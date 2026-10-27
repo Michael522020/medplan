@@ -86,9 +86,12 @@ export function normalizeAuditQuery(raw: Record<string, unknown>): {
 } {
   const text = (value: unknown): string | undefined =>
     typeof value === 'string' && value.length > 0 ? value : undefined;
-  const int = (value: unknown): number | undefined => {
-    const parsed = Number.parseInt(String(value ?? ''), 10);
-    return Number.isFinite(parsed) ? parsed : undefined;
+  // 转换失败保留 NaN，让 s.number() 报「必须为有限数字」（10001），
+  // 而不是静默套用缺省值（那会让用户以为翻到了第 1 页，实际参数被丢弃）
+  const int = (value: unknown, fallback: number): number => {
+    if (value === undefined || value === null || value === '') return fallback;
+    const parsed = Number.parseInt(String(value), 10);
+    return Number.isNaN(parsed) ? Number.NaN : parsed;
   };
 
   // eventType 可重复传：Fastify 在重复 query key 时给出数组
@@ -107,8 +110,8 @@ export function normalizeAuditQuery(raw: Record<string, unknown>): {
     result: text(raw.result),
     eventTimeFrom: text(raw.eventTimeFrom),
     eventTimeTo: text(raw.eventTimeTo),
-    page: int(raw.page) ?? 1,
-    limit: int(raw.limit) ?? 20,
+    page: int(raw.page, 1),
+    limit: int(raw.limit, 20),
     // 契约默认 true：质控追溯场景建议开启
     verifyChain: raw.verifyChain === undefined ? true : raw.verifyChain === true || raw.verifyChain === 'true',
   };

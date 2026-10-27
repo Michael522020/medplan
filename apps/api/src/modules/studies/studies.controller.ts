@@ -28,9 +28,14 @@ export class StudiesController {
     @Query() query: Record<string, unknown>,
     @Req() request: { headers: Record<string, unknown> }
   ): Promise<components['schemas']['StudyListResponse']> {
-    // 校验枚举类参数（非法枚举 -> 10001）
-    parseOrThrow(studyListQuerySchema, query, 'query');
+    // **先 normalize 再校验**。
+    //
+    // Fastify 的 query 参数永远是字符串（`?page=1` -> `'1'`）。
+    // 若把原始 query 直接交给 `s.number()` 校验器，必定报「必须为有限数字」，
+    // 于是 `GET /api/v1/studies?page=1&limit=20` 直接 400。
+    // 顺序反了，工作台的翻页与每页条数就用不了。
     const filters = normalizeStudyListQuery(query);
+    parseOrThrow(studyListQuerySchema, filters, 'query');
     const deidentify = parseDeidentifyHeader(request.headers['x-deidentify']);
     return this.studiesService.listStudies(session, filters, deidentify);
   }

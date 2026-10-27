@@ -26,8 +26,11 @@ export class AuditLogsController {
     @CurrentSession() session: Session,
     @Query() query: Record<string, unknown>
   ): Promise<components['schemas']['AuditLogListResponse']> {
-    parseOrThrow(auditLogQuerySchema, query, 'query');
+    // **先 normalize 再校验**：Fastify 的 query 参数永远是字符串
+    // （`?page=1` -> `'1'`），直接交给 `s.number()` 会报「必须为有限数字」，
+    // 导致 `GET /api/v1/audit-logs?page=1` 直接 400。
     const filters = normalizeAuditQuery(query);
+    parseOrThrow(auditLogQuerySchema, filters, 'query');
     return this.auditLogsService.queryAuditLogs(
       session,
       filters,

@@ -4,6 +4,8 @@ import { Pool } from 'pg';
 
 import { withBusinessSearchPath } from '../common/db/pool.js';
 import { StudiesRepository } from '../modules/studies/studies.repository.js';
+import { normalizeStudyListQuery, studyListQuerySchema } from '../modules/studies/studies.schema.js';
+import { parseOrThrow } from '../common/validation/schema.js';
 import type { AccessContext } from '../common/db/access-scope.repository.js';
 
 /**
@@ -127,5 +129,49 @@ describeIf('数据库 schema 集成测试（真实 PostgreSQL）', () => {
       false,
       '明文视图不应有 name_masked 列'
     );
+  });
+
+  it('缺陷 3 回归：listStudies 的 JOIN 在 WHERE 之前（否则 42601）', async () => {
+    // JOIN 必须属于 FROM 列表。`WHERE ... LEFT JOIN ...` 是语法错误，
+    // 而这是工作台列表端点 —— 语法错误在纯逻辑单测里永远暴露不出来，
+    // 必须在真库上执行一次。
+    const baseSelect = `
+        FROM studies s
+        JOIN visits v ON v.id = s.visit_id
+        JOIN v_patients_masked p ON p.id = s.patient_id
+        LEFT JOIN LATERAL (
+          SELECT r.id, r.status
+            FROM reports r
+           WHERE r.study_id = s.id
+             AND r.deleted_at IS NULL
+           ORDER BY r.version DESC
+           LIMIT 1
+        ) latest ON TRUE`;
+    const result = await pool.query(
+      `SELECT s.study_uid, latest.id AS report_id ${baseSelect} WHERE TRUE ORDER BY s.study_date DESC LIMIT 20`
+    );
+    assert.ok(Array.isArray(result.rows));
+  });
+
+  it('缺陷 4 回归：query 参数先 normalize 再校验（否则 ?page=1 直接 400）', async () => {
+    // Fastify 的 query 全是字符串。直接把原始 query 交给 s.number()
+    // 会报「必须为有限数字」—— 工作台翻页与审计查询分页直接不可用。
+    const raw = { page: '1', limit: '20' };
+    const normalized = normalizeStudyListQuery(raw);
+    assert.equal(normalized.page, 1);
+    assert.equal(normalized.limit, 20);
+    // normalize 后必须能通过数值校验
+    parseOrThrow(studyListQuerySchema, normalized, 'query');
+    // 反例：原始 query 过不了数值校验
+    assert.throws(() => parseOrThrow(studyListQuerySchema, raw, 'query'));
+  });
+
+  it('缺陷 4 回归：非法数字不被静默套用缺省值（?page=abc 应报 10001）', async () => {
+    const normalized = normalizeStudyListQuery({ page: 'abc' });
+    assert.ok(
+      Number.isNaN(normalized.page),
+      '转换失败必须保留 NaN 让校验器拒绝，而不是静默变成第 1 页'
+    );
+    assert.throws(() => parseOrThrow(studyListQuerySchema, normalized, 'query'));
   });
 });

@@ -122,11 +122,26 @@ export class StudiesRepository {
     const patientView = usePlainName ? 'v_patients_plain' : 'v_patients_masked';
     const patientNameColumn = usePlainName ? 'p.name' : 'p.name_masked';
 
+    // baseSelect 是**纯 FROM 列表**（不含 WHERE）。
+    //
+    // PostgreSQL（与标准 SQL）要求 JOIN 属于 FROM 列表，
+    // `WHERE <expr> LEFT JOIN ...` 是 42601 语法错误。
+    // 曾经把 WHERE 写进 baseSelect 再接 LEFT JOIN LATERAL，
+    // 导致 GET /api/v1/studies（工作台入口）直接 500。
+    // 因此：所有 JOIN（含 LATERAL）必须落在 baseSelect 内部，
+    // WHERE 由调用处单独拼接。
     const baseSelect = `
         FROM studies s
         JOIN visits v ON v.id = s.visit_id
         JOIN ${patientView} p ON p.id = s.patient_id
-       WHERE ${where.sql}`;
+        LEFT JOIN LATERAL (
+          SELECT r.id, r.status
+            FROM reports r
+           WHERE r.study_id = s.id
+             AND r.deleted_at IS NULL
+           ORDER BY r.version DESC
+           LIMIT 1
+        ) latest ON TRUE`;
 
     // 排序字段白名单。**绝不**把用户输入拼进 ORDER BY ——
     // 列名无法参数化，只能靠白名单映射（契约 Sort 参数说明：仅允许白名单字段，防注入）
@@ -169,14 +184,7 @@ export class StudiesRepository {
                 CASE WHEN s.read_at IS NOT NULL THEN s.read_at ELSE now() END - s.study_date
               )))::bigint AS queue_wait_seconds
          ${baseSelect}
-         LEFT JOIN LATERAL (
-           SELECT r.id, r.status
-             FROM reports r
-            WHERE r.study_id = s.id
-              AND r.deleted_at IS NULL
-            ORDER BY r.version DESC
-            LIMIT 1
-         ) latest ON TRUE
+        WHERE ${where.sql}
         ORDER BY ${orderColumn} ${orderDirection}, s.id ${orderDirection}
         LIMIT $${where.values.length + 1} OFFSET $${where.values.length + 2}`,
       [...where.values, filters.limit, offset]
@@ -184,7 +192,7 @@ export class StudiesRepository {
 
     const totalResult = await query<{ total: number }>(
       this.pool,
-      `SELECT count(*)::int AS total ${baseSelect}`,
+      `SELECT count(*)::int AS total ${baseSelect} WHERE ${where.sql}`,
       where.values
     );
 

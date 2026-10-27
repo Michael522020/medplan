@@ -76,8 +76,16 @@ export type StudyListQuery = {
  *
  * Fastify 的 query 参数全是字符串（`?page=2` -> `'2'`）。
  * 直接交给数值校验器会因类型不符而报「必须为有限数字」，
- * 因此这里先做显式转换；转换失败的值按「未传」处理，
- * 由后续的缺省逻辑接管。
+ * 因此这里先做显式转换。
+ *
+ * ## 转换失败的处理
+ *
+ * **不能**把转换失败的值当作「未传」而套用缺省值 ——
+ * 那会让 `?page=abc` 静默变成第 1 页，用户以为翻到了第 1 页，
+ * 实际是分页参数被丢弃。正确做法是保留 NaN，让 `s.number()` 校验器
+ * 报「必须为有限数字」（10001）。
+ *
+ * 缺省值只在**参数根本没传**时套用。
  */
 export function normalizeStudyListQuery(raw: Record<string, unknown>): {
   patientId?: string;
@@ -94,9 +102,11 @@ export function normalizeStudyListQuery(raw: Record<string, unknown>): {
 } {
   const text = (value: unknown): string | undefined =>
     typeof value === 'string' && value.length > 0 ? value : undefined;
-  const int = (value: unknown): number | undefined => {
-    const parsed = Number.parseInt(String(value ?? ''), 10);
-    return Number.isFinite(parsed) ? parsed : undefined;
+  const int = (value: unknown, fallback: number): number => {
+    if (value === undefined || value === null || value === '') return fallback;
+    const parsed = Number.parseInt(String(value), 10);
+    // NaN 会被 s.number() 拒绝 -> 10001，而不是静默套用缺省值
+    return Number.isNaN(parsed) ? Number.NaN : parsed;
   };
 
   return {
@@ -109,7 +119,7 @@ export function normalizeStudyListQuery(raw: Record<string, unknown>): {
     visitType: text(raw.visitType),
     sort: text(raw.sort) ?? 'studyDate',
     order: (text(raw.order) as 'asc' | 'desc' | undefined) ?? 'desc',
-    page: int(raw.page) ?? 1,
-    limit: int(raw.limit) ?? 20,
+    page: int(raw.page, 1),
+    limit: int(raw.limit, 20),
   };
 }
