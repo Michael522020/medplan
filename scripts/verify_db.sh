@@ -46,10 +46,18 @@ bad()  { FAIL=$((FAIL+1)); printf '  FAIL  %s\n' "$*"; }
 # （fn_verify_audit_chain / fn_check_nhc_field_coverage），
 # 表现为 "function does not exist" —— 而表名带 medplan. 前缀所以能查到，
 # 造成「表能查、函数查不到」的迷惑现象。
-PG_OPTS=(-h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -v ON_ERROR_STOP=1)
+#
+# **用 PGOPTIONS 而不是 SQL 里的 SET**：
+# 在 -c 里写 `SET search_path ...; SELECT ...` 时，psql 会把 SET 的回显
+# （字面量 "SET"）也混进输出，污染变量值 —— 表现为
+# 「[: SET: integer expected」以及各种计数断言莫名失败。
+# PGOPTIONS 在连接建立时由服务器应用，不产生任何输出。
 PG_SCHEMA="${PG_SCHEMA:-medplan}"
+export PGOPTIONS="-c search_path=$PG_SCHEMA,public"
 
-psql_q() { PGPASSWORD="$PG_PASS" psql "${PG_OPTS[@]}" -d "$PG_DB" -tAc "SET search_path TO $PG_SCHEMA, public; $1"; }
+PG_OPTS=(-h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -v ON_ERROR_STOP=1)
+
+psql_q() { PGPASSWORD="$PG_PASS" psql "${PG_OPTS[@]}" -d "$PG_DB" -tAc "$1"; }
 
 # 管理库连接：CREATE/DROP DATABASE 不能在连接到目标库时执行，
 # 必须连到 postgres 维护库。否则目标库不存在时第一步就失败。

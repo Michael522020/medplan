@@ -81,26 +81,35 @@ export class PlanCommandsRepository {
   }
 
   /**
-   * 按幂等键查「已执行过的更新」。
+   * 按幂等键查「已执行过的写操作」。
    *
    * ## 为什么幂等键存在 plan_commands 而不是 plans
    *
    * `plans.idempotency_key` 上有唯一约束 `uq_plans_idempotency`，
    * 一个方案行只能存一个幂等键 —— 那是**创建**用的。
    * 更新操作需要各自的幂等键（同一方案可能被多次更新，每次重试都要能
-   * 识别出「这次重试」），因此把更新用的幂等键记在
-   * `plan_commands.after_value` 里。
+   * 识别出「这次重试」），因此把幂等键记在 `plan_commands.after_value` 里。
    *
    * `plan_commands` 是 append-only 的操作日志，天然适合承载这类元信息，
    * 且不需要改动已锁定的 schema.sql。
+   *
+   * 创建与更新统一走这里：创建命令的 after_value 同样存幂等键与指纹，
+   * 于是**两条路径的幂等语义完全一致**（同键同体 -> 重放；同键异体 -> 冲突）。
+   *
+   * ## 返回值带请求指纹
+   *
+   * 契约要求「同一幂等键 + **不同**请求体 -> 10001（幂等键冲突）」。
+   * 因此必须能把**首次请求的请求体**与**本次请求的请求体**比对 ——
+   * 指纹（SHA-256）就是为此存的。
    */
-  async findUpdateByIdempotencyKey(
+  async findCommandByIdempotencyKey(
     planId: string,
     idempotencyKey: string
-  ): Promise<{ versionAfter: number | null } | undefined> {
-    const row = await queryOne<{ version_after: number | null }>(
+  ): Promise<{ versionAfter: number | null; requestFingerprint: string | null } | undefined> {
+    const row = await queryOne<{ version_after: number | null; request_fingerprint: string | null }>(
       this.pool,
-      `SELECT version_after
+      `SELECT version_after,
+              after_value->>'requestFingerprint' AS request_fingerprint
          FROM plan_commands
         WHERE plan_id = $1
           AND after_value->>'idempotencyKey' = $2
@@ -108,6 +117,8 @@ export class PlanCommandsRepository {
         LIMIT 1`,
       [planId, idempotencyKey]
     );
-    return row ? { versionAfter: row.version_after } : undefined;
+    return row
+      ? { versionAfter: row.version_after, requestFingerprint: row.request_fingerprint }
+      : undefined;
   }
 }

@@ -55,15 +55,25 @@ export class PlansService {
     const fingerprint = fingerprintRequestBody(body).digest;
 
     // 幂等重放
+    //
+    // 契约 §2：「同一 Idempotency-Key + 同一请求体 -> 返回首次结果，
+    // HTTP 200 + data.idempotentReplay = true」；
+    // 「同一 Idempotency-Key + **不同**请求体 -> code 10001（幂等键冲突）」。
+    //
+    // 比对用**请求体指纹**，而不是逐字段比较 ——
+    // 逐字段比较会漏字段（曾漏掉 title 与 segmentationTaskId），
+    // 漏掉的字段变化就��会被误判成「同一体」而静默返回旧结果。
     const existing = await this.repository.findByIdempotencyKey(idempotencyKey);
     if (existing) {
-      const sameRequest =
-        existing.study_uid === body.studyUid &&
-        existing.plan_type === body.planType &&
-        JSON.stringify(existing.payload) === JSON.stringify(body.payload);
-      if (!sameRequest) {
-        resolveIdempotentReplay('different', fingerprint);
+      const recorded = await this.commandsRepository.findCommandByIdempotencyKey(
+        existing.id,
+        idempotencyKey
+      );
+      if (recorded?.requestFingerprint !== fingerprint) {
+        // 同键异体 -> 幂等键冲突（10001）
+        resolveIdempotentReplay(recorded?.requestFingerprint ?? 'different', fingerprint);
       }
+      // 同键同体 -> 返回首次结果
       return this.toPlanResponse(existing, true);
     }
 
@@ -95,7 +105,15 @@ export class PlansService {
         planId: plan.id,
         commandType: 'create',
         beforeValue: null,
-        afterValue: { payload: body.payload, status: 'draft' },
+        // 幂等键与请求体指纹：创建与更新两条路径的幂等语义统一。
+        // 指纹让「同键但请求体不同」能被识别为幂等键冲突（10001），
+        // 而不会被静默当成重试。
+        afterValue: {
+          payload: body.payload,
+          status: 'draft',
+          idempotencyKey,
+          requestFingerprint: fingerprint,
+        },
         actorId: session.userId,
         versionBefore: null,
         versionAfter: 1,
@@ -142,6 +160,8 @@ export class PlansService {
     const planId = parseResourceId(planIdParam, 'plan');
     const idempotencyKey = assertIdempotencyKey(idempotencyKeyHeader);
     const access = toAccessContext(session);
+    // 请求体指纹。用于幂等重放时判定「同键同体」还是「同键异体」
+    const fingerprint = fingerprintRequestBody(body).digest;
 
     // 恒定索引路径的探测查询
     await this.repository.probe(planId);
@@ -152,10 +172,22 @@ export class PlansService {
       throw AppError.inaccessible();
     }
 
-    // 幂等重放：同一幂等键的更新已执行过 -> 返回当前状态，不产生多余版本。
-    // 契约：「重试不产生多余版本」。
-    const replay = await this.commandsRepository.findUpdateByIdempotencyKey(planId, idempotencyKey);
+    // 幂等重放：同一幂等键的更新已执行过 -> 返回首次结果，不产生多余版本。
+    //
+    // 契约 §2：「同一 Idempotency-Key + 同一请求体 -> 返回首次结果，
+    // HTTP 200 + data.idempotentReplay = true」；「同一 Idempotency-Key +
+    // **不同**请求体 -> code 10001（幂等键冲突）」。
+    //
+    // 关键：**必须**比对请求体指纹。若只按幂等键命中就返回，
+    // 客户端复用幂等键改参数时会被静默当成「重试」，
+    // 返回一个与本次请求无关的旧结果 —— 这比报冲突危险得多。
+    const replay = await this.commandsRepository.findCommandByIdempotencyKey(planId, idempotencyKey);
     if (replay) {
+      if (replay.requestFingerprint !== fingerprint) {
+        // 同键异体 -> 幂等键冲突（10001）
+        resolveIdempotentReplay(replay.requestFingerprint ?? 'different', fingerprint);
+      }
+      // 同键同体 -> 返回首次结果
       return this.toPlanResponse(current, true);
     }
 
@@ -202,12 +234,15 @@ export class PlansService {
         planId,
         commandType: body.status ? 'update_status' : 'update_payload',
         beforeValue: { payload: current.payload, title: current.title, status: current.status },
-        // 幂等键记在 after_value 里：同键重试可识别为重放，不产生多余版本
+        // 幂等键与请求体指纹记在 after_value 里：
+        //   - 幂等键 -> 同键重试可识别为重放，不产生多余版本
+        //   - 指纹   -> 同键但请求体不同可识别为「幂等键冲突」（10001）
         afterValue: {
           payload: plan.payload,
           title: plan.title,
           status: plan.status,
           idempotencyKey,
+          requestFingerprint: fingerprint,
         },
         actorId: session.userId,
         versionBefore: current.version,
