@@ -35,7 +35,7 @@
 | 电子签名绑定与失效 | SM3 摘要绑定正文，改一字符签名即失效；服务端权威锁定标志防前端绕过 |
 | 设计 Token 单一数据源 | JSON 是唯一权威，CSS 由脚本生成，三处副本由门禁校验不漂移 |
 
-**941 条静态断言 + 13 条编译期负向断言 + 真实数据库执行验证**，全部可在 CI 复现。
+**968 条静态断言 + 13 条编译期负向断言 + 23 组真实数据库执行验证**，全部可在 CI 复现，本地 `npm run verify:db:local` 秒级出结果。
 
 ---
 
@@ -238,7 +238,7 @@ graph LR
 | Phase 1 并行调研 | 已完成 | PRD / 架构方案 + 7 份 ADR / UIUX |
 | Phase 1.5 Spec 生成 | 已完成 | `docs/Spec.md`（15 章，规格即契约） |
 | Phase 2 设计细化 | 已完成 | `openapi.yaml` / `schema.sql` / 迁移 / `UIUX-P2.md` |
-| **Phase 3 并行开发** | **进行中** | monorepo 骨架 + 门禁工具链已就位，业务页面待实现 |
+| **Phase 3 并行开发** | **进行中** | 前后端 12 端点 + 4 页面已实现，门禁工具链完备 |
 | Phase 4 测试交付 | 待启动 | — |
 
 ---
@@ -246,20 +246,26 @@ graph LR
 ## 七、契约门禁（开发期强约束）
 
 ```bash
-npm run lint         # 926 条静态断言
-npm run typecheck    # 前后端类型检查 + 13 条编译期负向断言
-npm run build:web    # 前端真实构建
-npm run verify:db    # 真实执行验证（需 PG18；无 PG 时 exit 2 并指向手工清单）
+npm run lint              # 968 条静态断言
+npm run typecheck         # 前后端类型检查 + 13 条编译期负向断言
+npm run build:web         # 前端真实构建
+npm run verify:db:local   # 本地 Docker 起 PG18 跑真实执行验证（秒级，需 Docker）
+npm run verify:db         # 真实执行验证（CI 用，需本机有 PG18）
+npm run recall:pitfalls   # 按技术栈指纹召回本项目已知坑
 ```
 
 | 门禁 | 断言数 | 守护什么 |
 |------|-------|---------|
 | `lint:openapi` | 560 | 契约结构、x-audit 覆盖、AI 字段黑名单、幂等头 |
 | `lint:schema` | 191 | DDL 结构、卫健委字段覆盖、权限与分区 |
-| `lint:migrations` | 149 | 迁移与 schema 逐列比对、运行时分区默认权限 |
+| `lint:migrations` | 155 | 迁移与 schema 逐列比对、运行时分区默认权限、**append-only 语义**、**触发器引用带 schema 前缀** |
 | `lint:tokens` | 17 | Token 三处副本同步、Canvas 恒暗、危急值可区分 |
 | `lint:icons` | 6 | 图标名真实存在、无 emoji、无第二套图标库 |
 | `lint:css-vars` | 3 | CSS 变量引用均已定义（防静默失效） |
+| `lint:publish` | 16 | 公开仓脱敏：无凭证、无内网地址、无未打码身份、许可清单完整 |
+| `lint:viewer-boundary` | 7 | 阅片区封装层边界（core/ 外禁止直连 Cornerstone、`preferSizeOverAccuracy` 写死 true） |
+| `lint:bundle` | 6 | 产物体积：入口 chunk 不内联 Cornerstone（4MB 按需加载） |
+| `lint:shell` | 7 | .sh 必须 LF + 有 shebang + git mode 100755 |
 
 **为什么合规边界写在契约里而不是文档里**：纪律靠人守，类型和断言靠 CI 守。
 `SegmentationStructure.additionalProperties: false` + `required: [structureName, structureLabelZh, volumeMl, confirmed]`
@@ -268,23 +274,57 @@ npm run verify:db    # 真实执行验证（需 PG18；无 PG 时 exit 2 并指�
 CI 配置见 `.github/workflows/contract-guard.yml`，每次 push / PR 强制执行，
 并起 PostgreSQL 18 服务容器跑真实执行验证。
 
+### 数据库验证：本地比 CI 快
+
+数据库的**运行时行为**（分区路由、触发器是否生效、REVOKE 是否真挡住、
+扩展函数能否解析）只有真跑一次才知道。本项目提供本地通道：
+
+```bash
+npm run verify:db:local    # 自动起 PG18 容器 -> 跑 23 组验证 -> 清理容器
+```
+
+**秒级出结果**。这一点很重要 —— 2026-10-27 那次修复连续三轮 CI
+（每轮约 2 分钟，且失败要等下一轮才能拿到诊断）才定位到根因。
+CI 保留作为最终把关，但不再是唯一的反馈通道。
+
+验证覆盖 23 组：审计表物理不可改（REVOKE + 触发器双层）、hash chain 衔接与完整性、
+分区兜底、卫健委必备字段覆盖、AI 模型版本锁、最小权限（ai_worker 无 PHI 表权限）、
+幂等键唯一约束。
+
 ### 已知环境警告（不必处理）
 
 `npm install` 会输出 `EBADENGINE: @cornerstonejs/codec-libjxl 要求 node>=24`。
 这是**误报** —— 该包是纯 WebAssembly，在浏览器端加载。调查过程与结论见
 `docs/decisions/ADR-008.md`。运行时锁定 Node 22 LTS。
 
-### Phase 3 开工前检查清单
+### Phase 3 检查清单
 
 | # | 检查项 | 状态 |
 |---|--------|------|
-| 1 | `npm run lint` 全绿 | 926/926 通过 |
+| 1 | `npm run lint` 全绿 | **968/968 通过** |
 | 2 | `npm run typecheck` 通过 | 通过（13 条负向断言） |
-| 3 | `npm run build:web` 真实构建 | 通过 |
+| 3 | `npm run build:web` 真实构建 | 通过（入口 57KB，Cornerstone 4MB 按需加载） |
 | 4 | monorepo 骨架 | 已建（apps/web + apps/api + packages/contracts + packages/design-tokens） |
-| 5 | `npm run verify:db` 真实执行 | **未执行** —— 见 `docs/db/manual-verify.md`，需有 PG18 的环境补跑 |
-| 6 | GPU 现状确认 | 待用户确认（无 GPU 则 AI-01 降级 P1） |
-| 7 | CA / TSA / 密码机采购启动 | 待启动（周期最长，提前 2 个月） |
-| 8 | 互联互通目标等级确认 | 待确认（四甲 or 仅三级等保） |
-| 9 | 业务页面实现 | 待开发（7 个页面按 Spec §7 逐个填充） |
+| 5 | 12 个 API 端点实现 | **全部实现**，路由与 openapi 逐条比对零缺失零多余 |
+| 6 | 4 个页面实现 | login / worklist / viewer / reports 已实现 |
+| 7 | 后端单元测试 | 36 条全绿（覆盖四条安全约束 + 幂等 + 校验器） |
+| 8 | `verify:db` 真实执行 | **23/23 通过**（本地 Docker PG18 + CI 服务容器双通道） |
+| 9 | 公开仓 | 已发布 `Michael522020/medplan`（Apache-2.0，PUBLIC） |
+| 10 | GPU 现状确认 | 待用户确认（无 GPU 则 AI-01 降级 P1） |
+| 11 | CA / TSA / 密码机采购启动 | 待启动（周期最长，提前 2 个月） |
+| 12 | 互联互通目标等级确认 | 待确认（四甲 or 仅三级等保） |
+| 13 | 真实 PACS 联调 | 待院内环境（WADO-RS 响应体形态需实测） |
+
+### 已知外部依赖（需院内环境，当前为 fail-closed 占位）
+
+以下适配器**端口与错误语义已就位**，未配置时全部 fail-closed
+（签名不可用、吊销查不到按吊销处理），但需接院内真实服务：
+
+| 适配器 | 依赖 | 现状 |
+|---|---|---|
+| `UkeyCertificateProvider` | CA 证书查询服务 | 端口就位，需院内 CA |
+| `TsaClient` | TSA 时间戳服务 | 端口就位 + NTP 漂移数学已用模拟服务器验证 |
+| `RevocationChecker` | CRL / OCSP 分发点 | 端口就位 |
+| PACS 取图 | dcm4chee-arc-light | 端口就位，需真实 PACS |
+| Redis Stream 入队 | Redis | **未实现**（任务落库后 status='queued'，投递通道待与 AI 模块负责人确认） |
 
