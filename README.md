@@ -61,197 +61,7 @@
 
 ---
 
-## 二、整体架构
-
-```mermaid
-graph TB
-    subgraph 医生端["医生工作站（院内网）"]
-        FE["阅片前端<br/>Cornerstone3D + React"]
-        WS["协作同步客户端<br/>WebSocket"]
-    end
-
-    subgraph 接入层["接入层 · 自研"]
-        GW["API 网关<br/>鉴权/限流/审计拦截"]
-    end
-
-    subgraph 应用层["应用层 · 自研"]
-        SVC1["阅片服务"]
-        SVC2["规划服务"]
-        SVC3["报告服务"]
-        SVC4["签名服务"]
-        SVC5["审计服务"]
-        SVC6["协作同步服务"]
-    end
-
-    subgraph AI层["AI 推理层"]
-        Q["任务队列<br/>Redis Stream"]
-        W1["分割 Worker<br/>TotalSegmentator"]
-        W2["推理 Worker<br/>MONAI"]
-    end
-
-    subgraph 影像基础设施["影像基础设施 · 开源"]
-        ORTH["Orthanc / DCM4CHEE<br/>DICOM PACS"]
-        DWEB["DICOMweb<br/>WADO-RS/QIDO-RS/STOW-RS"]
-    end
-
-    subgraph 数据层["数据层"]
-        PG[("PostgreSQL<br/>业务+审计")]
-        OSS[("MinIO<br/>报告/截图/模型")]
-    end
-
-    FE --> GW
-    WS --> SVC6
-    GW --> SVC1 & SVC2 & SVC3 & SVC4 & SVC5
-    SVC1 & SVC2 --> DWEB
-    DWEB --> ORTH
-    SVC2 --> Q
-    Q --> W1 & W2
-    W1 --> SVC2
-    SVC3 --> OSS
-    SVC4 --> OSS
-    SVC1 & SVC3 --> PG
-    SVC5 --> PG
-
-    style FE fill:#1f6feb,stroke:#0d419d,color:#ffffff
-    style W1 fill:#238636,stroke:#0f5323,color:#ffffff
-    style ORTH fill:#6e40c9,stroke:#4c2889,color:#ffffff
-    style PG fill:#9e6a03,stroke:#6e4603,color:#ffffff
-```
-
----
-
-## 三、核心业务时序（AI 分割任务）
-
-```mermaid
-sequenceDiagram
-    participant D as 医生
-    participant FE as 前端
-    participant API as 规划服务
-    participant Q as 任务队列
-    participant GPU as GPU Worker
-    participant OSS as MinIO
-
-    D->>FE: 勾选结构提交分割
-    FE->>API: POST /api/v1/segmentation/tasks
-    API->>API: 权限校验 + 审计埋点
-    API->>Q: 入队（携带 studyUid）
-    API-->>FE: 202 + taskId
-    loop 轮询/WebSocket
-        FE->>API: GET /tasks/{taskId}
-        API-->>FE: QUEUED / RUNNING / DONE
-    end
-    GPU->>GPU: 拉取 DICOM → 推理
-    GPU->>OSS: 上传 mask + STL/NIfTI
-    GPU->>Q: 回调 DONE
-    Q->>API: 更新任务状态
-    API->>OSS: 落盘结果
-    API-->>FE: 可加载三维模型
-    D->>FE: 入路规划标注
-    FE->>API: POST /api/v1/plans
-    API->>API: 审计留痕
-    API-->>FE: 规划方案已保存
-```
-
----
-
-## 四、文档索引
-
-| 文档 | 说明 |
-|------|------|
-| `docs/Spec.md` | **规格契约**（15 章）：锁定范围 / API / 表 / 页面 / Token / 验收标准。开发唯一依据 |
-| `docs/PRD.md` | 用户故事、功能需求、合规需求映射、验收标准 |
-| `docs/架构方案.md` | 选型矩阵、分层架构、DB Schema、风险缓解 |
-| `docs/UIUX.md` / `docs/UIUX-P2.md` | 设计契约 + 页面级规格（7 页 × 7 要素，42 组件，126 快捷键） |
-| `docs/openapi.yaml` | OpenAPI 3.0 契约（12 端点 / 63 schema），前后端唯一依据 |
-| `docs/db/schema.sql` / `docs/db/migrations/` | PostgreSQL 18 DDL 与可执行迁移 |
-| `docs/db/manual-verify.md` | 数据库真实执行验证手工清单（无 PG 环境时的等效替代） |
-| `docs/design-tokens.json` / `.css` | 设计 Token 唯一数据源（JSON 是权威，CSS 由脚本生成） |
-| `docs/decisions/ADR-*.md` | 架构决策记录（MADR 格式，9 条） |
-| `docs/licenses/THIRD-PARTY.md` | 第三方依赖许可清单（**公开仓必读**） |
-| `docs/DECISIONS-NEEDED.md` | 待确认决策清单 |
-| `compliance/` | 等保三级与卫健委条款逐条对照表 |
-| `.workbuddy/memory/` | 开发过程记忆：踩坑记录与未决登记册（**非产品代码，见该目录的 README**） |
-
----
-
-## 五、开源内核与自研边界
-
-```mermaid
-flowchart LR
-    subgraph 开源直接复用["开源直接复用（不自研）"]
-        A1["Cornerstone3D<br/>渲染引擎"]
-        A2["OHIF<br/>阅片工作台"]
-        A3["Orthanc / DCM4CHEE<br/>DICOM PACS"]
-        A4["TotalSegmentator / MONAI<br/>AI 分割"]
-    end
-
-    subgraph 必须自研["必须自研（开源未覆盖）"]
-        B1["患者主索引 EMPI"]
-        B2["RBAC + 科室数据隔离"]
-        B3["全链路审计中间件"]
-        B4["电子签名服务"]
-        B5["结构化报告引擎"]
-        B6["三维实时协作同步层"]
-        B7["AI 边界护栏<br/>禁止 AI 出诊断结论"]
-    end
-
-    subgraph 待评估["待评估（二开）"]
-        C1["OHIF 报告扩展"]
-        C2["三维协作 CRDT/OT"]
-    end
-
-    A2 --> B1 & B2 & B5
-    A3 --> B1
-    A4 --> B7
-    B6 --> C2
-    C1 --> B5
-
-    style 开源直接复用 fill:#0f5323,color:#ffffff
-    style 必须自研 fill:#9e6a03,color:#ffffff
-    style 待评估 fill:#6e40c9,color:#ffffff
-```
-
-**核心判断**：开源清单覆盖了「能不能做」，但完全没覆盖「能不能上线」。合规外壳（EMPI / 权限 / 审计 / 电子签名 / AI 边界）才是本项目的主要工作量。
-
----
-
-## 六、工程结构与当前进度
-
-```mermaid
-graph LR
-    subgraph apps["apps/"]
-        WEB["web<br/>React 19.3.1 + Vite 8<br/>阅片工作台 / 报告 / 规划"]
-        API["api<br/>NestJS 12 + Fastify 5<br/>controllers→services→repositories"]
-    end
-    subgraph packages["packages/"]
-        CT["contracts<br/>openapi 生成的类型<br/>前后端共享"]
-        DT["design-tokens<br/>Token 分发副本"]
-    end
-    subgraph docsdir["docs/ 单一数据源"]
-        OA["openapi.yaml"]
-        SC["db/schema.sql"]
-        TK["design-tokens.json"]
-    end
-    OA -->|"gen:types"| CT
-    TK -->|"build_tokens.py"| DT
-    SC --> API
-    CT --> WEB
-    CT --> API
-    DT --> WEB
-```
-
-| Phase | 状态 | 产出 |
-|-------|------|------|
-| Phase 0 需求澄清 | 已完成 | 核心需求 3 句话 + 合规底线 |
-| Phase 1 并行调研 | 已完成 | PRD / 架构方案 + 7 份 ADR / UIUX |
-| Phase 1.5 Spec 生成 | 已完成 | `docs/Spec.md`（15 章，规格即契约） |
-| Phase 2 设计细化 | 已完成 | `openapi.yaml` / `schema.sql` / 迁移 / `UIUX-P2.md` |
-| **Phase 3 并行开发** | **进行中** | 前后端 12 端点 + 4 页面已实现，门禁工具链完备 |
-| Phase 4 测试交付 | **进行中** | QA 独立验证 + 运维交付编排 |
-
----
-
-## 七、快速开始
+## 二、快速开始
 
 > 本节是**外部贡献者第一次上手**的完整路径。所有命令都在 Linux / macOS / Windows
 > (Git Bash) 下实测通过。
@@ -317,6 +127,196 @@ docs/              Spec / 契约 / DDL / ADR / UIUX
 scripts/           门禁脚本 + 运维脚本
 deploy/            容器编排（见 docs/ops/RUNBOOK.md）
 ```
+
+---
+
+## 三、整体架构
+
+```mermaid
+graph TB
+    subgraph 医生端["医生工作站（院内网）"]
+        FE["阅片前端<br/>Cornerstone3D + React"]
+        WS["协作同步客户端<br/>WebSocket"]
+    end
+
+    subgraph 接入层["接入层 · 自研"]
+        GW["API 网关<br/>鉴权/限流/审计拦截"]
+    end
+
+    subgraph 应用层["应用层 · 自研"]
+        SVC1["阅片服务"]
+        SVC2["规划服务"]
+        SVC3["报告服务"]
+        SVC4["签名服务"]
+        SVC5["审计服务"]
+        SVC6["协作同步服务"]
+    end
+
+    subgraph AI层["AI 推理层"]
+        Q["任务队列<br/>Redis Stream"]
+        W1["分割 Worker<br/>TotalSegmentator"]
+        W2["推理 Worker<br/>MONAI"]
+    end
+
+    subgraph 影像基础设施["影像基础设施 · 开源"]
+        ORTH["Orthanc / DCM4CHEE<br/>DICOM PACS"]
+        DWEB["DICOMweb<br/>WADO-RS/QIDO-RS/STOW-RS"]
+    end
+
+    subgraph 数据层["数据层"]
+        PG[("PostgreSQL<br/>业务+审计")]
+        OSS[("MinIO<br/>报告/截图/模型")]
+    end
+
+    FE --> GW
+    WS --> SVC6
+    GW --> SVC1 & SVC2 & SVC3 & SVC4 & SVC5
+    SVC1 & SVC2 --> DWEB
+    DWEB --> ORTH
+    SVC2 --> Q
+    Q --> W1 & W2
+    W1 --> SVC2
+    SVC3 --> OSS
+    SVC4 --> OSS
+    SVC1 & SVC3 --> PG
+    SVC5 --> PG
+
+    style FE fill:#1f6feb,stroke:#0d419d,color:#ffffff
+    style W1 fill:#238636,stroke:#0f5323,color:#ffffff
+    style ORTH fill:#6e40c9,stroke:#4c2889,color:#ffffff
+    style PG fill:#9e6a03,stroke:#6e4603,color:#ffffff
+```
+
+---
+
+## 四、核心业务时序（AI 分割任务）
+
+```mermaid
+sequenceDiagram
+    participant D as 医生
+    participant FE as 前端
+    participant API as 规划服务
+    participant Q as 任务队列
+    participant GPU as GPU Worker
+    participant OSS as MinIO
+
+    D->>FE: 勾选结构提交分割
+    FE->>API: POST /api/v1/segmentation/tasks
+    API->>API: 权限校验 + 审计埋点
+    API->>Q: 入队（携带 studyUid）
+    API-->>FE: 202 + taskId
+    loop 轮询/WebSocket
+        FE->>API: GET /tasks/{taskId}
+        API-->>FE: QUEUED / RUNNING / DONE
+    end
+    GPU->>GPU: 拉取 DICOM → 推理
+    GPU->>OSS: 上传 mask + STL/NIfTI
+    GPU->>Q: 回调 DONE
+    Q->>API: 更新任务状态
+    API->>OSS: 落盘结果
+    API-->>FE: 可加载三维模型
+    D->>FE: 入路规划标注
+    FE->>API: POST /api/v1/plans
+    API->>API: 审计留痕
+    API-->>FE: 规划方案已保存
+```
+
+---
+
+## 五、文档索引
+
+| 文档 | 说明 |
+|------|------|
+| `docs/Spec.md` | **规格契约**（15 章）：锁定范围 / API / 表 / 页面 / Token / 验收标准。开发唯一依据 |
+| `docs/PRD.md` | 用户故事、功能需求、合规需求映射、验收标准 |
+| `docs/架构方案.md` | 选型矩阵、分层架构、DB Schema、风险缓解 |
+| `docs/UIUX.md` / `docs/UIUX-P2.md` | 设计契约 + 页面级规格（7 页 × 7 要素，42 组件，126 快捷键） |
+| `docs/openapi.yaml` | OpenAPI 3.0 契约（12 端点 / 63 schema），前后端唯一依据 |
+| `docs/db/schema.sql` / `docs/db/migrations/` | PostgreSQL 18 DDL 与可执行迁移 |
+| `docs/db/manual-verify.md` | 数据库真实执行验证手工清单（无 PG 环境时的等效替代） |
+| `docs/design-tokens.json` / `.css` | 设计 Token 唯一数据源（JSON 是权威，CSS 由脚本生成） |
+| `docs/decisions/ADR-*.md` | 架构决策记录（MADR 格式，9 条） |
+| `docs/licenses/THIRD-PARTY.md` | 第三方依赖许可清单（**公开仓必读**） |
+| `docs/DECISIONS-NEEDED.md` | 待确认决策清单 |
+| `compliance/` | 等保三级与卫健委条款逐条对照表 |
+| `.workbuddy/memory/` | 开发过程记忆：踩坑记录与未决登记册（**非产品代码，见该目录的 README**） |
+
+---
+
+## 六、开源内核与自研边界
+
+```mermaid
+flowchart LR
+    subgraph 开源直接复用["开源直接复用（不自研）"]
+        A1["Cornerstone3D<br/>渲染引擎"]
+        A2["OHIF<br/>阅片工作台"]
+        A3["Orthanc / DCM4CHEE<br/>DICOM PACS"]
+        A4["TotalSegmentator / MONAI<br/>AI 分割"]
+    end
+
+    subgraph 必须自研["必须自研（开源未覆盖）"]
+        B1["患者主索引 EMPI"]
+        B2["RBAC + 科室数据隔离"]
+        B3["全链路审计中间件"]
+        B4["电子签名服务"]
+        B5["结构化报告引擎"]
+        B6["三维实时协作同步层"]
+        B7["AI 边界护栏<br/>禁止 AI 出诊断结论"]
+    end
+
+    subgraph 待评估["待评估（二开）"]
+        C1["OHIF 报告扩展"]
+        C2["三维协作 CRDT/OT"]
+    end
+
+    A2 --> B1 & B2 & B5
+    A3 --> B1
+    A4 --> B7
+    B6 --> C2
+    C1 --> B5
+
+    style 开源直接复用 fill:#0f5323,color:#ffffff
+    style 必须自研 fill:#9e6a03,color:#ffffff
+    style 待评估 fill:#6e40c9,color:#ffffff
+```
+
+**核心判断**：开源清单覆盖了「能不能做」，但完全没覆盖「能不能上线」。合规外壳（EMPI / 权限 / 审计 / 电子签名 / AI 边界）才是本项目的主要工作量。
+
+---
+
+## 七、工程结构与当前进度
+
+```mermaid
+graph LR
+    subgraph apps["apps/"]
+        WEB["web<br/>React 19.3.1 + Vite 8<br/>阅片工作台 / 报告 / 规划"]
+        API["api<br/>NestJS 12 + Fastify 5<br/>controllers→services→repositories"]
+    end
+    subgraph packages["packages/"]
+        CT["contracts<br/>openapi 生成的类型<br/>前后端共享"]
+        DT["design-tokens<br/>Token 分发副本"]
+    end
+    subgraph docsdir["docs/ 单一数据源"]
+        OA["openapi.yaml"]
+        SC["db/schema.sql"]
+        TK["design-tokens.json"]
+    end
+    OA -->|"gen:types"| CT
+    TK -->|"build_tokens.py"| DT
+    SC --> API
+    CT --> WEB
+    CT --> API
+    DT --> WEB
+```
+
+| Phase | 状态 | 产出 |
+|-------|------|------|
+| Phase 0 需求澄清 | 已完成 | 核心需求 3 句话 + 合规底线 |
+| Phase 1 并行调研 | 已完成 | PRD / 架构方案 + 7 份 ADR / UIUX |
+| Phase 1.5 Spec 生成 | 已完成 | `docs/Spec.md`（15 章，规格即契约） |
+| Phase 2 设计细化 | 已完成 | `openapi.yaml` / `schema.sql` / 迁移 / `UIUX-P2.md` |
+| **Phase 3 并行开发** | **进行中** | 前后端 12 端点 + 4 页面已实现，门禁工具链完备 |
+| Phase 4 测试交付 | **进行中** | QA 独立验证 + 运维交付编排 |
 
 ---
 
