@@ -197,7 +197,7 @@ CREATE OR REPLACE FUNCTION fn_audit_chain_guard()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = medplan, pg_temp
+SET search_path = medplan, public, pg_temp
 AS $$
 DECLARE
   v_prev_hash text;

@@ -12,7 +12,7 @@
     "packages/*"
   ],
   "scripts": {
-    "lint": "npm run lint:openapi && npm run lint:schema && npm run lint:migrations && npm run lint:tokens && npm run lint:icons && npm run lint:css-vars && npm run lint:viewer-boundary",
+    "lint": "npm run lint:openapi && npm run lint:schema && npm run lint:migrations && npm run lint:tokens && npm run lint:icons && npm run lint:css-vars && npm run lint:shell",
     "lint:openapi": "node scripts/lint_openapi.js",
     "lint:schema": "node scripts/lint_schema.js",
     "lint:migrations": "node scripts/lint_migrations.js",
@@ -34,7 +34,9 @@
     "build": "npm run build:web && npm run build:api",
     "recall:pitfalls": "node scripts/recall_pitfalls.js",
     "lint:publish": "node scripts/lint_publish.js",
-    "lint:bundle": "node scripts/lint_bundle_size.js"
+    "lint:bundle": "node scripts/lint_bundle_size.js",
+    "lint:shell": "node scripts/lint_shell_scripts.js",
+    "verify:db:local": "bash scripts/verify_db_local.sh"
   },
   "devDependencies": {
     "js-yaml": "4.1.0",

@@ -192,15 +192,23 @@ COMMENT ON TYPE retention_class IS
 -- ---------------------------------------------------------------------
 
 -- SM3 适配层。未部署 pg_sm3 时降级 SHA-256（见文件头说明）
+--
+-- **search_path 必须包含 public**：
+-- pgcrypto 扩展默认安装在 public schema（digest 函数在那里），
+-- 而函数体里调的是裸 `digest(...)`。若 search_path 不含 public，
+-- plpgsql 在**首次执行时**才解析函数名 —— 迁移阶段不报错，
+-- 运行时才抛「function digest(bytea, unknown) does not exist」。
+-- 这是延迟绑定最隐蔽的失败形式：DDL 看起来完全正常。
 CREATE OR REPLACE FUNCTION sm3_or_fallback(p_text text)
 RETURNS bytea
 LANGUAGE plpgsql
+SET search_path = medplan, public, pg_temp
 AS $$
 BEGIN
   IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_sm3') THEN
-    RETURN sm3(convert_to(p_text, 'UTF8'));
+    RETURN public.sm3(convert_to(p_text, 'UTF8'));
   ELSE
-    RETURN digest(convert_to(p_text, 'UTF8'), 'sha256');
+    RETURN public.digest(convert_to(p_text, 'UTF8'), 'sha256');
   END IF;
 END;
 $$;
@@ -215,7 +223,7 @@ CREATE OR REPLACE FUNCTION fn_audit_chain_guard()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = medplan, pg_temp
+SET search_path = medplan, public, pg_temp
 AS $$
 DECLARE
   v_prev_hash text;

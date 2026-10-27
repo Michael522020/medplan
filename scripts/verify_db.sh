@@ -19,9 +19,16 @@
 #   1. 静态检查仍必须通过：npm run lint
 #   2. 按 docs/db/manual-verify.md 的手工清单逐条执行（与本脚本等效）
 # =====================================================================
+#!/usr/bin/env bash
+# 兼容 CRLF：Windows 上编辑后直接执行会让 bash 报
+#   "set: pipefail\r: invalid option name" 与 "$'\r': command not found"
+# 仓库用 .gitattributes 统一为 LF（CI 检出是 LF），但本地工作区可能是 CRLF。
+# 这里做一次自愈转换，保证「在哪台机器上都能直接跑」。
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# 项目根：默认由脚本位置推算（脚本在 <root>/scripts/ 下）。
+# 可用 MEDPLAN_ROOT 覆盖 —— 容器里挂载路径与仓库结构不同时需要。
+ROOT="${MEDPLAN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 MANUAL_VERIFY="$ROOT/docs/db/manual-verify.md"
 
 PG_HOST="${PG_HOST:-127.0.0.1}"
@@ -30,8 +37,7 @@ PG_USER="${PG_USER:-postgres}"
 PG_PASS="${PG_PASS:-medplan_test_only}"
 PG_DB="${PG_DB:-medplan_verify}"
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MIGRATION="$ROOT/docs/db/migrations/001_init.sql"
+MIGRATION="${MIGRATION:-$ROOT/docs/db/migrations/001_init.sql}"
 
 PASS=0
 FAIL=0
@@ -162,7 +168,7 @@ fi
 if PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
      -v ON_ERROR_STOP=1 -tAc \
      "INSERT INTO medplan.audit_logs (actor_id, event_type, result, resource_type, resource_id, hash_prev, hash_self)
-      VALUES (NULL,'trigger_probe','success','probe','probe-1', repeat('0',64), repeat('0',64));" >/tmp/r4a.log 2>&1; then
+      VALUES (NULL,'auth_login','success','session','probe-1', repeat('0',64), repeat('0',64));" >/tmp/r4a.log 2>&1; then
   ok "触发器探针行插入成功（INSERT 触发器未报错）"
 else
   bad "触发器探针行插入失败"
@@ -201,7 +207,7 @@ else
   # 诊断：char(64) 会被 PostgreSQL 去掉尾部空格，空格填充的 char 读出来可能是空串。
   # 用 length() 与 quote() 区分「真的是空」与「被空格填充后读成空」。
   say "    诊断 length(hash_prev) = [$(psql_q "SELECT length(hash_prev) FROM medplan.audit_logs ORDER BY id LIMIT 1;")]"
-  say "    诊断 quote(hash_prev)   = [$(psql_q "SELECT quote(hash_prev) FROM medplan.audit_logs ORDER BY id LIMIT 1;")]"
+  say "    诊断 quote(hash_prev)   = [$(psql_q "SELECT quote(hash_prev::text) FROM medplan.audit_logs ORDER BY id LIMIT 1;")]"
   say "    诊断 首行 id/行数       = [$(psql_q "SELECT min(id) FROM medplan.audit_logs;")] / [$(psql_q "SELECT count(*) FROM medplan.audit_logs;")]"
   say "    诊断 触发器清单         = [$(psql_q "SELECT string_agg(tgname, ',') FROM pg_trigger WHERE tgrelid='medplan.audit_logs'::regclass AND NOT tgisinternal;")]"
 fi
