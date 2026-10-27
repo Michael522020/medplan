@@ -631,7 +631,7 @@ $$;
 
 CREATE TRIGGER trg_sync_study_patient
 BEFORE INSERT OR UPDATE OF visit_id ON studies
-FOR EACH ROW EXECUTE FUNCTION fn_sync_study_patient();
+FOR EACH ROW EXECUTE FUNCTION medplan.fn_sync_study_patient();
 
 -- ---------------------------------------------------------------------
 -- 8. 序列：series（DCM-02 期相自动分组）
@@ -819,14 +819,40 @@ CREATE TABLE segmentation_confirms (
   retention_class   retention_class NOT NULL DEFAULT 'plan_15y',
   created_at        timestamptz  NOT NULL DEFAULT now(),
   updated_at        timestamptz  NOT NULL DEFAULT now(),
-  CONSTRAINT uq_seg_confirm_task_structure UNIQUE (task_id, structure_name),
+  -- 幂等键唯一：同一 Idempotency-Key 的重复提交不产生重复确认记录
+  CONSTRAINT uq_seg_confirm_idem UNIQUE (idempotency_key),
   -- 修改必须有备注：无备注的修改一律拒绝
   CONSTRAINT ck_seg_confirm_note_required CHECK (
     action <> 'modified' OR (modification_note IS NOT NULL AND char_length(trim(modification_note)) > 0)
   )
 );
 
-COMMENT ON TABLE segmentation_confirms IS '医师对 AI 标记的逐项确认。append-only，变更追加新记录';
+-- **不用 UNIQUE (task_id, structure_name)**。
+--
+-- 契约（openapi.yaml /segmentation-tasks/{taskId}/confirm）明确：
+--   「同一 structureName 重复确认以最后一次为准，每次变更追加 segmentation_confirms 记录
+--     （append-only，不 UPDATE）」
+--
+-- 若保留 (task_id, structure_name) 唯一约束，第二次确认同一结构会撞唯一约束，
+-- 追加语义直接失效 —— 契约与 DDL 自相矛盾。
+--
+-- 正确做法：表保持 append-only（不 UPDATE 不 DELETE），
+-- 「当前确认状态」由视图按 (task_id, structure_name) 取最新一条得出。
+-- 查最新状态用窗口函数或 DISTINCT ON，无需唯一约束。
+CREATE INDEX idx_seg_confirm_task_structure
+  ON segmentation_confirms (task_id, structure_name, confirmed_at DESC);
+
+-- 当前确认状态视图：每个结构取最新一条确认
+CREATE OR REPLACE VIEW v_segmentation_confirm_current AS
+SELECT DISTINCT ON (task_id, structure_name)
+  task_id, structure_name, action, modification_note, volume_ml_snapshot,
+  confirmed_by, confirmed_at, pending_supervisor_review
+FROM segmentation_confirms
+ORDER BY task_id, structure_name, confirmed_at DESC, id DESC;
+
+COMMENT ON VIEW v_segmentation_confirm_current IS
+  '每个 (task_id, structure_name) 的最新确认记录。确认表本身 append-only，'
+  '「以最后一次为准」的语义由本视图提供，不用 UNIQUE 约束实现';
 COMMENT ON COLUMN segmentation_confirms.modification_note IS '修改说明。action=modified 时**必填**（无备注的修改一律拒绝）';
 COMMENT ON COLUMN segmentation_confirms.volume_ml_snapshot IS '确认时体积快照。医师手工修改后与 AI 原值可能不同，快照保证可回溯';
 COMMENT ON COLUMN segmentation_confirms.pending_supervisor_review IS '实习/试用期医师确认标记。为 true 时报告不可提交';
@@ -1034,13 +1060,13 @@ $$;
 
 CREATE TRIGGER trg_reports_no_delete_signed
 BEFORE DELETE ON reports
-FOR EACH ROW EXECUTE FUNCTION fn_reports_signed_guard();
+FOR EACH ROW EXECUTE FUNCTION medplan.fn_reports_signed_guard();
 
 CREATE TRIGGER trg_reports_no_signed_update
 BEFORE UPDATE ON reports
 FOR EACH ROW
 WHEN (OLD.status IN ('signed','archived'))
-EXECUTE FUNCTION fn_reports_signed_guard();
+EXECUTE FUNCTION medplan.fn_reports_signed_guard();
 
 -- ---------------------------------------------------------------------
 -- 13. 签名与签名日志：signature_logs
@@ -1134,11 +1160,11 @@ COMMENT ON COLUMN signature_logs.retention_class IS '签名日志永久保留。
 
 CREATE TRIGGER trg_signature_logs_immutable
 BEFORE UPDATE OR DELETE ON signature_logs
-FOR EACH ROW EXECUTE FUNCTION fn_append_only_guard();
+FOR EACH ROW EXECUTE FUNCTION medplan.fn_append_only_guard();
 
 CREATE TRIGGER trg_signature_logs_no_truncate
 BEFORE TRUNCATE ON signature_logs
-FOR EACH STATEMENT EXECUTE FUNCTION fn_append_only_guard();
+FOR EACH STATEMENT EXECUTE FUNCTION medplan.fn_append_only_guard();
 
 -- ---------------------------------------------------------------------
 -- 14. 审计日志：audit_logs（等保 8.1.4.3 核心）
@@ -1208,20 +1234,20 @@ CREATE TABLE audit_logs_2027_01 PARTITION OF audit_logs
 -- hash chain 计算触发器
 CREATE TRIGGER trg_audit_chain
 BEFORE INSERT ON audit_logs
-FOR EACH ROW EXECUTE FUNCTION fn_audit_chain_guard();
+FOR EACH ROW EXECUTE FUNCTION medplan.fn_audit_chain_guard();
 
 -- 防篡改触发器（第一层权限之外的第二层保险）
 CREATE TRIGGER trg_audit_logs_no_update
 BEFORE UPDATE ON audit_logs
-FOR EACH ROW EXECUTE FUNCTION fn_append_only_guard();
+FOR EACH ROW EXECUTE FUNCTION medplan.fn_append_only_guard();
 
 CREATE TRIGGER trg_audit_logs_no_delete
 BEFORE DELETE ON audit_logs
-FOR EACH ROW EXECUTE FUNCTION fn_append_only_guard();
+FOR EACH ROW EXECUTE FUNCTION medplan.fn_append_only_guard();
 
 CREATE TRIGGER trg_audit_logs_no_truncate
 BEFORE TRUNCATE ON audit_logs
-FOR EACH STATEMENT EXECUTE FUNCTION fn_append_only_guard();
+FOR EACH STATEMENT EXECUTE FUNCTION medplan.fn_append_only_guard();
 
 -- ---------------------------------------------------------------------
 -- 15. 索引（架构方案 §7.4 清单落地）
@@ -1368,7 +1394,7 @@ BEGIN
   ] LOOP
     EXECUTE format(
       'CREATE TRIGGER trg_%I_updated_at BEFORE UPDATE ON %I
-       FOR EACH ROW EXECUTE FUNCTION fn_set_updated_at()', t, t);
+       FOR EACH ROW EXECUTE FUNCTION medplan.fn_set_updated_at()', t, t);
   END LOOP;
 END;
 $$;

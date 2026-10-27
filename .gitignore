@@ -62,3 +62,8 @@ temp/
 *.sqlite3
 *.db
 pgdata/
+
+# 构建与测试产物
+.bootcheck/
+.test-build/
+apps/api/.test-build/

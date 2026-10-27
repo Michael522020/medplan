@@ -533,7 +533,7 @@ COMMENT ON COLUMN studies.patient_id IS '冗余字段，由触发器与 visits.p
 
 CREATE TRIGGER trg_sync_study_patient
 BEFORE INSERT OR UPDATE OF visit_id ON studies
-FOR EACH ROW EXECUTE FUNCTION fn_sync_study_patient();
+FOR EACH ROW EXECUTE FUNCTION medplan.fn_sync_study_patient();
 
 CREATE TABLE series (
   id                  uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -683,13 +683,27 @@ CREATE TABLE segmentation_confirms (
   retention_class           retention_class NOT NULL DEFAULT 'plan_15y',
   created_at                timestamptz NOT NULL DEFAULT now(),
   updated_at                timestamptz NOT NULL DEFAULT now(),
-  CONSTRAINT uq_seg_confirm_task_structure UNIQUE (task_id, structure_name),
+  CONSTRAINT uq_seg_confirm_idem UNIQUE (idempotency_key),
   -- 修改必须有备注：无备注的修改一律拒绝（电子病历修改留痕要求）
   CONSTRAINT ck_seg_confirm_note_required CHECK (
     action <> 'modified'
     OR (modification_note IS NOT NULL AND char_length(trim(modification_note)) > 0)
   )
 );
+
+-- 不用 UNIQUE (task_id, structure_name)：契约要求 append-only
+-- （同一 structureName 重复确认以最后一次为准，每次变更追加新记录），
+-- 唯一约束会让第二次确认直接冲突。最新状态由视图提供。
+CREATE INDEX idx_seg_confirm_task_structure
+  ON segmentation_confirms (task_id, structure_name, confirmed_at DESC);
+
+CREATE OR REPLACE VIEW v_segmentation_confirm_current AS
+SELECT DISTINCT ON (task_id, structure_name)
+  task_id, structure_name, action, modification_note, volume_ml_snapshot,
+  confirmed_by, confirmed_at, pending_supervisor_review
+FROM segmentation_confirms
+ORDER BY task_id, structure_name, confirmed_at DESC, id DESC;
+
 COMMENT ON TABLE segmentation_confirms IS '医师对 AI 标记的逐项确认。append-only，变更追加新记录';
 COMMENT ON COLUMN segmentation_confirms.modification_note IS '修改说明。action=modified 时**必填**';
 COMMENT ON COLUMN segmentation_confirms.volume_ml_snapshot IS '确认时体积快照。医师手工修改后与 AI 原值可能不同，快照保证可回溯';
@@ -839,13 +853,13 @@ COMMENT ON COLUMN report_revisions.change_summary IS '变更摘要。由后端�
 -- 已签署报告禁止删除与修改
 CREATE TRIGGER trg_reports_no_delete_signed
 BEFORE DELETE ON reports
-FOR EACH ROW EXECUTE FUNCTION fn_reports_signed_guard();
+FOR EACH ROW EXECUTE FUNCTION medplan.fn_reports_signed_guard();
 
 CREATE TRIGGER trg_reports_no_signed_update
 BEFORE UPDATE ON reports
 FOR EACH ROW
 WHEN (OLD.status IN ('signed','archived'))
-EXECUTE FUNCTION fn_reports_signed_guard();
+EXECUTE FUNCTION medplan.fn_reports_signed_guard();
 
 -- ---------------------------------------------------------------------
 -- 10. 签名日志（WS/T 847—2024）
@@ -915,11 +929,11 @@ COMMENT ON COLUMN signature_logs.log_integrity_digest IS
 
 CREATE TRIGGER trg_signature_logs_immutable
 BEFORE UPDATE OR DELETE ON signature_logs
-FOR EACH ROW EXECUTE FUNCTION fn_append_only_guard();
+FOR EACH ROW EXECUTE FUNCTION medplan.fn_append_only_guard();
 
 CREATE TRIGGER trg_signature_logs_no_truncate
 BEFORE TRUNCATE ON signature_logs
-FOR EACH STATEMENT EXECUTE FUNCTION fn_append_only_guard();
+FOR EACH STATEMENT EXECUTE FUNCTION medplan.fn_append_only_guard();
 
 -- ---------------------------------------------------------------------
 -- 11. 审计日志（等保 8.1.4.3）
@@ -973,20 +987,20 @@ CREATE TABLE audit_logs_2027_01 PARTITION OF audit_logs
 
 CREATE TRIGGER trg_audit_chain
 BEFORE INSERT ON audit_logs
-FOR EACH ROW EXECUTE FUNCTION fn_audit_chain_guard();
+FOR EACH ROW EXECUTE FUNCTION medplan.fn_audit_chain_guard();
 
 CREATE TRIGGER trg_audit_logs_no_update
 BEFORE UPDATE ON audit_logs
-FOR EACH ROW EXECUTE FUNCTION fn_append_only_guard();
+FOR EACH ROW EXECUTE FUNCTION medplan.fn_append_only_guard();
 
 CREATE TRIGGER trg_audit_logs_no_delete
 BEFORE DELETE ON audit_logs
-FOR EACH ROW EXECUTE FUNCTION fn_append_only_guard();
+FOR EACH ROW EXECUTE FUNCTION medplan.fn_append_only_guard();
 
 -- TRUNCATE 不触发行级触发器，必须单独声明语句级触发器
 CREATE TRIGGER trg_audit_logs_no_truncate
 BEFORE TRUNCATE ON audit_logs
-FOR EACH STATEMENT EXECUTE FUNCTION fn_append_only_guard();
+FOR EACH STATEMENT EXECUTE FUNCTION medplan.fn_append_only_guard();
 
 -- ---------------------------------------------------------------------
 -- 12. 索引（架构方案 §7.4）
@@ -1109,7 +1123,7 @@ BEGIN
   ] LOOP
     EXECUTE format(
       'CREATE TRIGGER trg_%I_updated_at BEFORE UPDATE ON %I
-       FOR EACH ROW EXECUTE FUNCTION fn_set_updated_at()', t, t);
+       FOR EACH ROW EXECUTE FUNCTION medplan.fn_set_updated_at()', t, t);
   END LOOP;
 END;
 $$;

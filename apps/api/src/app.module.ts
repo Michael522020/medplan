@@ -142,10 +142,7 @@ import { AuditLogsService } from './modules/audit-logs/audit-logs.service.js';
     {
       provide: AUTH_CONFIG,
       useFactory: (): AuthServiceConfig => ({
-        sessionSecret: Buffer.from(
-          process.env.SESSION_SECRET ?? 'dev-only-insecure-secret-change-me',
-          'utf8'
-        ),
+        sessionSecret: readSessionSecret(),
         accessTokenTtlSeconds: Number(process.env.ACCESS_TOKEN_TTL ?? 28800),
         refreshTokenTtlSeconds: Number(process.env.REFRESH_TOKEN_TTL ?? 604800),
         lockThreshold: Number(process.env.LOGIN_LOCK_THRESHOLD ?? 5),
@@ -201,10 +198,7 @@ import { AuditLogsService } from './modules/audit-logs/audit-logs.service.js';
       // 两者都验签 —— 不接受未验签的用户头（见 jwt-verifier.ts 的信任模型）。
       provide: KEY_RESOLVER,
       useFactory: () => {
-        const sessionSecret = Buffer.from(
-          process.env.SESSION_SECRET ?? 'dev-only-insecure-secret-change-me',
-          'utf8'
-        );
+        const sessionSecret = readSessionSecret();
         const issuer = process.env.KEYCLOAK_URL;
         const realm = process.env.KEYCLOAK_REALM;
         if (!issuer || !realm) {
@@ -268,4 +262,27 @@ export class AppModule {
     // 启动期强校验：模型许可白名单完整性（AC-09）
     assertModelLicenseIntegrity();
   }
+}
+
+/**
+ * 读取会话签名密钥。
+ *
+ * 生产环境**必须**显式配置 `SESSION_SECRET`：未配置时拒绝启动，
+ * 而不是用一个「大家都知道的默认值」把服务跑起来 ——
+ * 那种默认值一旦上了生产，任何人都能伪造任意用户的会话令牌。
+ *
+ * 非生产环境（本地开发 / CI）允许用占位值，避免每次起服务都要配环境变量。
+ */
+function readSessionSecret(): Buffer {
+  const configured = process.env.SESSION_SECRET;
+  if (configured && configured.length >= 32) {
+    return Buffer.from(configured, 'utf8');
+  }
+  if (process.env.NODE_ENV === 'production') {
+    throw new Error(
+      '生产环境必须配置 SESSION_SECRET（长度 >= 32 字符）。' +
+        '未配置时拒绝启动 —— 默认密钥会让任何人能伪造会话令牌。'
+    );
+  }
+  return Buffer.from('dev-only-insecure-secret-change-me', 'utf8');
 }

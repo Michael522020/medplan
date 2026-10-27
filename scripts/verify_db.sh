@@ -40,11 +40,20 @@ say()  { printf '%s\n' "$*"; }
 ok()   { PASS=$((PASS+1)); printf '  ok    %s\n' "$*"; }
 bad()  { FAIL=$((FAIL+1)); printf '  FAIL  %s\n' "$*"; }
 
-psql_q() { PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 -tAc "$1"; }
+# 每次 psql 调用都是独立连接。迁移文件里设了 `SET search_path TO medplan, public`，
+# 但那**只在那一次连接内有效**。若不显式带上 search_path，
+# PG 默认解析到 `"$user", public`，会找不到 medplan schema 里的函数
+# （fn_verify_audit_chain / fn_check_nhc_field_coverage），
+# 表现为 "function does not exist" —— 而表名带 medplan. 前缀所以能查到，
+# 造成「表能查、函数查不到」的迷惑现象。
+PG_OPTS=(-h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -v ON_ERROR_STOP=1)
+PG_SCHEMA="${PG_SCHEMA:-medplan}"
+
+psql_q() { PGPASSWORD="$PG_PASS" psql "${PG_OPTS[@]}" -d "$PG_DB" -tAc "SET search_path TO $PG_SCHEMA, public; $1"; }
 
 # 管理库连接：CREATE/DROP DATABASE 不能在连接到目标库时执行，
 # 必须连到 postgres 维护库。否则目标库不存在时第一步就失败。
-psql_admin() { PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "${PG_ADMIN_DB:-postgres}" -v ON_ERROR_STOP=1 -tAc "$1"; }
+psql_admin() { PGPASSWORD="$PG_PASS" psql "${PG_OPTS[@]}" -d "${PG_ADMIN_DB:-postgres}" -tAc "$1"; }
 
 say "=== MedPlan 数据库真实执行验证 ==="
 say ""

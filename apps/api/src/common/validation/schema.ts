@@ -43,6 +43,14 @@ interface Ctx {
 export interface Schema<T> {
   /** 解析。失败时把问题记入 ctx 并返回 undefined（不抛异常） */
   parse(value: unknown, path: string, ctx: Ctx): T | undefined;
+  /**
+   * 该 schema 是否接受 undefined（缺省）。
+   *
+   * 之所以要显式声明：`parse` 失败时也返回 undefined，
+   * 与「可选字段缺省」无法从返回值上区分 ——
+   * 若靠返回值判断，可选字段会被误判成「必填缺失」而永远失败。
+   */
+  readonly acceptsUndefined?: boolean;
 }
 
 function push(ctx: Ctx, path: string, message: string): void {
@@ -206,7 +214,9 @@ export const s = {
           const raw = input[key];
           const fieldPath = child(path, key);
           if (raw === undefined) {
-            if (opts.partial) continue;
+            // 缺省字段：由 schema 自己决定是否可缺省（s.optional 允许）。
+            // 不能在这里直接判失败 —— 那会让 s.optional 完全失效。
+            if (opts.partial || schema.acceptsUndefined) continue;
             push(ctx, fieldPath, '为必填字段');
             ok = false;
             continue;
@@ -226,6 +236,7 @@ export const s = {
   /** 可选字段：缺省时返回 undefined */
   optional<T>(inner: Schema<T>): Schema<T | undefined> {
     return {
+      acceptsUndefined: true,
       parse(value: unknown, path: string, ctx: Ctx): T | undefined {
         if (value === undefined) return undefined;
         return inner.parse(value, path, ctx);

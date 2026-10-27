@@ -322,6 +322,59 @@ assert(
   '分区预建函数与 app_audit 角色均存在（权限链完整）'
 );
 
+/* ------------------------------------------- 14. append-only 语义（契约 vs DDL 一致性）
+ *
+ * 回归防护：契约（openapi.yaml /segmentation-tasks/{taskId}/confirm）要求
+ * segmentation_confirms 是 append-only —— 同一 structureName 重复确认以最后一次为准，
+ * 每次变更**追加新记录**。
+ *
+ * 若 DDL 里保留 UNIQUE (task_id, structure_name)，第二次确认会撞唯一约束，
+ * 追加语义直接失效 —— 契约与 DDL 自相矛盾。
+ * 「以最后一次为准」应由视图（v_segmentation_confirm_current）提供，
+ * 而不是用唯一约束实现。
+ *
+ * 这个缺陷真实存在过：DDL 用了唯一约束，契约要求 append-only，
+ * 两边同时成立不了。静态 lint 之前只比对 schema 与迁移文件的一致性，
+ * 没有拿 DDL 去对契约的语义要求，所以漏过了。 */
+/* 判据要限定在 segmentation_confirms 表的约束块内 ——
+ * segmentations 表（AI 分割结果，一任务一结构）本来就该 UNIQUE，
+ * 不能一刀切禁掉所有 (task_id, structure_name) 唯一约束。 */
+const confirmsBlock = (() => {
+  const i = initCode.indexOf('CREATE TABLE segmentation_confirms');
+  if (i === -1) return '';
+  const j = initCode.indexOf(');', i);
+  return initCode.slice(i, j === -1 ? i + 2000 : j);
+})();
+assert(
+  confirmsBlock.length > 0,
+  '迁移文件含 segmentation_confirms 表定义'
+);
+assert(
+  !/UNIQUE\s*\(\s*task_id\s*,\s*structure_name\s*\)/.test(confirmsBlock),
+  'segmentation_confirms 不用 UNIQUE (task_id, structure_name)（与契约 append-only 冲突）'
+);
+assert(
+  /CREATE OR REPLACE VIEW v_segmentation_confirm_current/.test(initCode),
+  '提供 v_segmentation_confirm_current 视图实现「以最后一次为准」语义'
+);
+assert(
+  /idx_seg_confirm_task_structure/.test(initCode),
+  '提供 (task_id, structure_name, confirmed_at DESC) 索引支撑最新记录查询'
+);
+assert(
+  /UNIQUE\s*\(\s*idempotency_key\s*\)/.test(initCode),
+  'segmentation_confirms 用 idempotency_key 唯一约束实现重复提交去重'
+);
+
+/* ------------------------------------------- 15. 触发器引用不依赖会话 search_path */
+{
+  const bareRefs = (initCode.match(/EXECUTE FUNCTION\s+(?!medplan\.)fn_\w+/g) || []).length;
+  assert(
+    bareRefs === 0,
+    `触发器引用函数时显式带 schema 前缀（不依赖会话 search_path，剩 ${bareRefs} 处未加）`
+  );
+}
+
 /* 输出 ------------------------------------------------------------------ */
 console.log('通过断言：' + passes.length);
 console.log('失败断言：' + failures.length);
