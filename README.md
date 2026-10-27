@@ -2,6 +2,14 @@
 
 > 一句话：面向院内影像科的私有化部署阅片与手术规划平台，用**开源做内核、自建合规壳**，满足等保 2.0 三级与卫健委电子病历管理规范。
 
+[![CI](https://github.com/Michael522020/medplan/actions/workflows/contract-guard.yml/badge.svg)](https://github.com/Michael522020/medplan/actions/workflows/contract-guard.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-22.x-3c873a.svg)](https://nodejs.org)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-18-336791.svg)](https://www.postgresql.org)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178c6.svg)](https://www.typescriptlang.org)
+
+**门禁现状**：980 条静态断言 · 13 条编译期负向断言 · 23 组真实 PostgreSQL 18 验证 · 全部可复现
+
 ---
 
 ## ⚠️ 使用前必读
@@ -35,7 +43,7 @@
 | 电子签名绑定与失效 | SM3 摘要绑定正文，改一字符签名即失效；服务端权威锁定标志防前端绕过 |
 | 设计 Token 单一数据源 | JSON 是唯一权威，CSS 由脚本生成，三处副本由门禁校验不漂移 |
 
-**968 条静态断言 + 13 条编译期负向断言 + 23 组真实数据库执行验证**，全部可在 CI 复现，本地 `npm run verify:db:local` 秒级出结果。
+**980 条静态断言 + 13 条编译期负向断言 + 23 组真实数据库执行验证**，全部可在 CI 复现，本地 `npm run verify:db:local` 秒级出结果。
 
 ---
 
@@ -315,7 +323,7 @@ deploy/            容器编排（见 docs/ops/RUNBOOK.md）
 ## 八、契约门禁（开发期强约束）
 
 ```bash
-npm run lint              # 968 条静态断言
+npm run lint              # 980 条静态断言
 npm run typecheck         # 前后端类型检查 + 13 条编译期负向断言
 npm run build:web         # 前端真实构建
 npm run verify:db:local   # 本地 Docker 起 PG18 跑真实执行验证（秒级，需 Docker）

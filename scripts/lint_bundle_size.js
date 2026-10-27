@@ -34,11 +34,22 @@ function assert(cond, label) {
 }
 
 if (!fs.existsSync(ASSETS)) {
-  console.log('构建产物不存在，请先执行 npm run build:web');
+  /*
+   * 没有构建产物时**跳过**，不算失败。
+   *
+   * 原因：这个门禁检查的是构建产物的体积，天然依赖 `npm run build:web` 先跑。
+   * 但它挂在 `npm run lint` 链上 —— 而 lint 应该在「还没构建」时也能独立跑通
+   * （CI 里是分步执行的，开发者本地也可能只想跑静态检查）。
+   *
+   * 报错说「请先构建」会让开发者以为 lint 坏了。正确做法是明确跳过，
+   * 并由 CI 的独立步骤（build 后再 lint:bundle）保证它一定会被执行到。
+   */
+  console.log('=== 前端构建产物体积门禁 ===');
+  console.log('跳过：未找到 apps/web/dist/assets（请先执行 npm run build:web）');
+  console.log('提示：CI 的「前端产物体积门禁」步骤会在构建之后执行本检查。');
   console.log('通过断言：0');
-  console.log('失败断言：1');
-  console.log('  FAIL  dist/assets 存在（需先构建）');
-  process.exit(1);
+  console.log('失败断言：0');
+  process.exit(0);
 }
 
 const files = fs.readdirSync(ASSETS);

@@ -32,9 +32,6 @@ npm-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# 临时验证目录（后端启动自检用，编译产物）
-.bootcheck/
-
 # 测试与覆盖率
 coverage/
 .nyc_output/
@@ -63,7 +60,11 @@ temp/
 *.db
 pgdata/
 
-# 构建与测试产物
+# 构建与测试产物（各角色的临时编译目录，不入库）
 .bootcheck/
+.opstmp/
+.qa-build/
+.qa-timing-trials/
 .test-build/
 apps/api/.test-build/
+apps/api/.qa-build/

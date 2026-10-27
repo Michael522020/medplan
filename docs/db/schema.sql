@@ -858,7 +858,92 @@ COMMENT ON COLUMN segmentation_confirms.volume_ml_snapshot IS '确认时体积�
 COMMENT ON COLUMN segmentation_confirms.pending_supervisor_review IS '实习/试用期医师确认标记。为 true 时报告不可提交';
 
 -- ---------------------------------------------------------------------
--- 11. 规划方案：plans（乐观锁，ADR-006：不用 CRDT/OT）
+-- 11. 任务投递发件箱：task_outbox
+--
+-- 目的：保证「任务存在 ⟺ 队列有消息」这个不变量。
+--
+-- 问题：任务落库与投递到 Redis Stream 是两个独立动作。若先投递后落库，
+--       Worker 拉取时任务还不存在会空转；若先落库后投递，投递失败则
+--       任务永远停在 queued 状态无人处理 —— **GPU 计算被静默丢弃**。
+--
+-- 做法：outbox 表与业务任务**同一事务**写入，事务提交后由投递器扫描
+--       pending 行投递。这样「任务不会丢」由数据库事务保证，
+--       与「审计写入失败必须 fail-closed」是同一种可靠性要求。
+--
+-- 与 002_add_task_outbox.sql 的关系：本文件是全量建库快照，
+--       两边定义必须一致（lint_migrations 逐项比对）。
+CREATE TABLE task_outbox (
+  id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  -- 业务任务 id。指向 segmentation_tasks.id
+  task_id           uuid         NOT NULL REFERENCES segmentation_tasks(id) ON DELETE CASCADE,
+  -- 业务类型。当前只有 'segmentation_task'，为将来其他任务类型留位
+  task_type         varchar(32)  NOT NULL DEFAULT 'segmentation_task',
+  -- 幂等键。与 segmentation_tasks.idempotency_key 一致，
+  -- 用于排查「这个键是否已投递过」
+  idempotency_key   char(36),
+  -- 投递载荷（JSON）。放 Worker 需要的最小信息（task_id 为主）
+  payload           jsonb        NOT NULL DEFAULT '{}'::jsonb,
+  -- 投递状态。pending = 待投递；dispatched = 已投递
+  dispatch_status   varchar(16)  NOT NULL DEFAULT 'pending',
+  -- 投递成功后的 Redis Stream 消息 ID。用于追溯「哪条消息对应哪个任务」
+  stream_message_id varchar(64),
+  -- 尝试次数。用于退避与告警（连续失败 N 次说明队列侧有问题）
+  attempt_count     integer      NOT NULL DEFAULT 0,
+  -- 最后一次失败原因。排查用，不含 PHI
+  last_error        text,
+  -- 下次可重试时间。退避用
+  next_retry_at     timestamptz,
+  created_at        timestamptz  NOT NULL DEFAULT now(),
+  dispatched_at     timestamptz,
+  updated_at        timestamptz  NOT NULL DEFAULT now(),
+  CONSTRAINT ck_task_outbox_status CHECK (
+    dispatch_status IN ('pending', 'dispatched')
+  )
+);
+
+COMMENT ON TABLE task_outbox IS
+  '任务投递发件箱。与业务任务同事务写入，保证「任务存在 ⟺ 队列有消息」';
+COMMENT ON COLUMN task_outbox.dispatch_status IS
+  'pending=待投递；dispatched=已投递。投递器只处理 pending';
+COMMENT ON COLUMN task_outbox.stream_message_id IS
+  '投递成功后的 Redis Stream 消息 ID。用于追溯「哪条消息对应哪个任务」';
+COMMENT ON COLUMN task_outbox.attempt_count IS
+  '投递尝试次数。连续失败 N 次说明队列侧有问题，应告警';
+COMMENT ON COLUMN task_outbox.next_retry_at IS
+  '下次可重试时间。投递失败后按退避策略设置';
+
+-- 部分索引只覆盖 pending —— dispatched 行占绝大多数（历史记录），
+-- 不该占用扫描器的索引空间。
+CREATE INDEX idx_task_outbox_pending
+  ON task_outbox (next_retry_at, created_at)
+  WHERE dispatch_status = 'pending';
+
+-- 按任务反查（排查用）
+CREATE INDEX idx_task_outbox_task_id
+  ON task_outbox (task_id);
+
+-- 权限：app_rw 业务账号（写 outbox 与任务同事务）；app_ro 只读。
+GRANT SELECT, INSERT, UPDATE, DELETE ON task_outbox TO app_rw;
+GRANT SELECT ON task_outbox TO app_ro;
+
+-- app_audit：**不给** outbox 权限。
+-- 理由：审计账号的职责边界是「只碰 audit_logs」。
+-- 给它 outbox 的写权限会扩大「被攻破后能改什么」的面 ——
+-- 攻击者若能改 outbox 状态，就能让任务永远不被投递（拒绝服务）。
+REVOKE ALL ON task_outbox FROM app_audit;
+
+-- ai_worker：Worker 需要把任务标记为 running / 成功 / 失败。
+-- 它**不直接改** outbox（那是投递器的职责），但要能查到自己的任务。
+GRANT SELECT ON task_outbox TO ai_worker;
+
+-- updated_at 自动维护：统一用触发器而非应用层赋值，
+-- 漏一处就会让审计追溯时数据不可信。
+DROP TRIGGER IF EXISTS trg_task_outbox_updated_at ON task_outbox;
+CREATE TRIGGER trg_task_outbox_updated_at BEFORE UPDATE ON task_outbox
+  FOR EACH ROW EXECUTE FUNCTION fn_set_updated_at();
+
+-- ---------------------------------------------------------------------
+-- 12. 规划方案：plans（乐观锁，ADR-006：不用 CRDT/OT）
 -- ---------------------------------------------------------------------
 CREATE TABLE plans (
   id                uuid PRIMARY KEY DEFAULT gen_random_uuid(),

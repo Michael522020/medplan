@@ -24,6 +24,25 @@ const strip = (s) => s.split(/\r?\n/).map((l) => l.replace(/--.*$/, '')).join('\
 const initCode = strip(init);
 const schemaCode = strip(schema);
 
+/**
+ * 所有迁移的并集（按文件名排序 = 执行顺序）。
+ *
+ * 为什么不能只比 001：
+ *   schema.sql 是**全量建库快照**（从零建库时直接跑它），
+ *   而 001_init.sql + 002_xxx.sql 才是**增量路径**。
+ *   两边最终状态必须一致 —— 否则「全量建库」与「增量升级」会得到不同的库。
+ *
+ *   之前这个门禁只读 001，新增 002 时就漏掉了它的索引与触发器，
+ *   导致 schema 与迁移不一致无法被发现。
+ */
+const migFiles = fs
+  .readdirSync(MIG)
+  .filter((f) => f.endsWith('.sql'))
+  .sort();
+const allMigCode = strip(
+  migFiles.map((f) => fs.readFileSync(path.join(MIG, f), 'utf8')).join('\n')
+);
+
 /* ---------------------------------------------------------------- 1. 语法粗检 */
 const OPEN = (s) => (s.match(/\(/g) || []).length;
 const CLOSE = (s) => (s.match(/\)/g) || []).length;
@@ -188,13 +207,17 @@ for (const t of TABLES) {
 /* ---------------------------------------------------------------- 5. 索引一致 */
 function indexesOf(code) {
   const out = new Set();
-  const re = /CREATE\s+(UNIQUE\s+)?INDEX\s+(\w+)/gi;
+  // 必须跳过 `IF NOT EXISTS`：
+  //   CREATE INDEX IF NOT EXISTS idx_foo ON ...
+  // 若不跳过，正则会把 `IF` 当成索引名，比对时就会出现
+  // 「migration 多: IF」这种无意义差异。
+  const re = /CREATE\s+(UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)/gi;
   let m;
   while ((m = re.exec(code))) out.add(m[2]);
   return out;
 }
 const si = indexesOf(schemaCode);
-const ii = indexesOf(initCode);
+const ii = indexesOf(allMigCode);
 const idxOnlySchema = [...si].filter((x) => !ii.has(x));
 const idxOnlyMig = [...ii].filter((x) => !si.has(x));
 assert(
@@ -215,7 +238,7 @@ function triggersOf(code) {
   return out;
 }
 const st = triggersOf(schemaCode);
-const it = triggersOf(initCode);
+const it = triggersOf(allMigCode);
 const trgOnlySchema = [...st].filter((x) => !it.has(x));
 assert(trgOnlySchema.length === 0, `触发器均在迁移中落地（schema 有 ${st.size} 个）${trgOnlySchema.length ? '缺:' + trgOnlySchema : ''}`);
 
@@ -228,7 +251,7 @@ function funcsOf(code) {
   return out;
 }
 const sf = funcsOf(schemaCode);
-const ifn = funcsOf(initCode);
+const ifn = funcsOf(allMigCode);
 const fnOnlySchema = [...sf].filter((x) => !ifn.has(x));
 assert(
   fnOnlySchema.length === 0,
@@ -284,7 +307,6 @@ for (const k of ['表数量', '审计表物理不可改', '签名日志不可改
 }
 
 /* ---------------------------------------------------------------- 12. 迁移清单登记 */
-const migFiles = fs.readdirSync(MIG).filter((f) => f.endsWith('.sql')).sort();
 assert(migFiles.includes('001_init.sql'), '迁移目录含 001_init.sql');
 
 /* 后续迁移是**正常的演进**，不是违规。这个断言原本写死「仅有初始迁移」，
