@@ -162,7 +162,7 @@ sequenceDiagram
 | `docs/licenses/THIRD-PARTY.md` | 第三方依赖许可清单（**公开仓必读**） |
 | `docs/DECISIONS-NEEDED.md` | 待确认决策清单 |
 | `compliance/` | 等保三级与卫健委条款逐条对照表 |
-| `.workbuddy/memory/` | 踩坑记录（`pitfalls.jsonl`）与未决登记册 |
+| `.workbuddy/memory/` | 开发过程记忆：踩坑记录与未决登记册（**非产品代码，见该目录的 README**） |
 
 ---
 
@@ -239,11 +239,80 @@ graph LR
 | Phase 1.5 Spec 生成 | 已完成 | `docs/Spec.md`（15 章，规格即契约） |
 | Phase 2 设计细化 | 已完成 | `openapi.yaml` / `schema.sql` / 迁移 / `UIUX-P2.md` |
 | **Phase 3 并行开发** | **进行中** | 前后端 12 端点 + 4 页面已实现，门禁工具链完备 |
-| Phase 4 测试交付 | 待启动 | — |
+| Phase 4 测试交付 | **进行中** | QA 独立验证 + 运维交付编排 |
 
 ---
 
-## 七、契约门禁（开发期强约束）
+## 七、快速开始
+
+> 本节是**外部贡献者第一次上手**的完整路径。所有命令都在 Linux / macOS / Windows
+> (Git Bash) 下实测通过。
+
+### 前置
+
+| 工具 | 版本 | 说明 |
+|------|------|------|
+| Node.js | **22.x（>=22.12.0，<23）** | Vite 8 要求 >=22.12.0。**不要升到 24** —— 见 `docs/decisions/ADR-008.md` |
+| npm | >=10 | 随 Node 22 附带 |
+| Docker | 任意近期版本 | 只有跑数据库验证才需要 |
+| PostgreSQL | 18 | 只有不用 Docker 时才需要 |
+
+### 四步跑起来
+
+```bash
+# 1. 装依赖
+npm ci
+
+# 2. ★ 生成契约类型 —— 必须先做这一步
+npm run gen:types
+
+# 3. 自检（应当全绿）
+npm run lint        # 968 条静态断言
+npm run typecheck   # 前后端类型检查 + 13 条编译期负向断言
+
+# 4. 构建
+npm run build:web
+```
+
+### ⚠️ 第 2 步为什么是必须的
+
+`packages/contracts/src/generated/` **不入库**（`.gitignore` 里有）——
+生成的类型必须与 `docs/openapi.yaml` 严格同步，进了版本库就会出现
+「契约改了但类型没改」的静默漂移。
+
+因此**契约类型由 `npm run gen:types` 从 `docs/openapi.yaml` 现场生成**。
+
+跳过这一步的症状：`tsc` 报
+`Cannot find module './generated/api-types'`，
+并连带出现一批 `TS7006: Parameter 'x' implicitly has an 'any' type`
+（类型缺失导致派生类型全部塌陷成 any，**这些不是真 bug**）。
+
+`npm run typecheck` 内部已经包含 `gen:types`，所以如果你只跑 typecheck 可以跳过第 2 步；
+但单独跑 `tsc` 或 IDE 里看到一片红时，先跑它。
+
+### 跑数据库验证（可选）
+
+```bash
+npm run verify:db:local
+```
+
+会自动起 PostgreSQL 18 容器、执行迁移、跑 23 组验证、清理容器，**秒级出结果**。
+
+### 目录速查
+
+```
+apps/web/          React 19 + Vite 8 阅片工作台
+apps/api/          NestJS 12 + Fastify 5 业务服务
+packages/contracts/    契约类型（生成的，不入库）
+packages/design-tokens/ 设计 Token 分发副本
+docs/              Spec / 契约 / DDL / ADR / UIUX
+scripts/           门禁脚本 + 运维脚本
+deploy/            容器编排（见 docs/ops/RUNBOOK.md）
+```
+
+---
+
+## 八、契约门禁（开发期强约束）
 
 ```bash
 npm run lint              # 968 条静态断言

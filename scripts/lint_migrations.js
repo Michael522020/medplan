@@ -286,10 +286,70 @@ for (const k of ['表数量', '审计表物理不可改', '签名日志不可改
 /* ---------------------------------------------------------------- 12. 迁移清单登记 */
 const migFiles = fs.readdirSync(MIG).filter((f) => f.endsWith('.sql')).sort();
 assert(migFiles.includes('001_init.sql'), '迁移目录含 001_init.sql');
+
+/* 后续迁移是**正常的演进**，不是违规。这个断言原本写死「仅有初始迁移」，
+ * 结果任何新增迁移都会让门禁失败 —— 那是把「门禁守护的东西」搞错了：
+ * 它该守的是「迁移与 schema 一致」，不是「迁移文件数量固定」。
+ *
+ * 真正要守的是：
+ *   1. 迁移文件编号连续（001, 002, ... 不能跳号，否则回滚顺序会错乱）
+ *   2. 每个后续迁移必须有配套的说明（不能是空文件或只有注释）
+ *   3. 后续迁移必须是**增量**的（不能重复 CREATE 主表 —— 001 已建过）
+ */
+const laterMigs = migFiles.filter((f) => f !== '001_init.sql');
 assert(
-  migFiles.filter((f) => f !== '001_init.sql').length === 0,
-  `当前仅有初始迁移（另有 ${migFiles.filter((f) => f !== '001_init.sql').length} 个后续迁移）`
+  laterMigs.every((f) => {
+    const m = f.match(/^(\d+)_(.+)\.sql$/);
+    return m !== null && Number(m[1]) >= 2;
+  }),
+  `后续迁移文件命名规范（NNN_描述.sql，编号 >= 002）${laterMigs.length ? '：' + laterMigs.join(', ') : ''}`
 );
+
+// 编号连续性：001,002,003... 不能跳号
+{
+  const nums = migFiles
+    .map((f) => f.match(/^(\d+)_/))
+    .filter(Boolean)
+    .map((m) => Number(m[1]))
+    .sort((a, b) => a - b);
+  const expected = nums.map((_, i) => i + 1);
+  assert(
+    JSON.stringify(nums) === JSON.stringify(expected),
+    `迁移编号连续无跳号（实际 ${nums.join(',')}）`
+  );
+}
+
+// 每个后续迁移必须有实质内容（不能是空壳）
+{
+  const emptyMigs = laterMigs.filter((f) => {
+    const content = fs.readFileSync(path.join(MIG, f), 'utf8');
+    // 去掉注释与空行后仍有 SQL 语句
+    const sql = content
+      .split(/\r?\n/)
+      .filter((l) => !l.trim().startsWith('--') && l.trim().length > 0)
+      .join('\n');
+    return sql.trim().length === 0;
+  });
+  assert(
+    emptyMigs.length === 0,
+    `后续迁移均有实质内容${emptyMigs.length ? '，空壳文件：' + emptyMigs.join(', ') : ''}`
+  );
+}
+
+// 后续迁移不得重复创建主表（001 已建），否则重复执行会报 already exists
+{
+  const reCreating = laterMigs.filter((f) => {
+    const content = fs.readFileSync(path.join(MIG, f), 'utf8');
+    return /CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?(medplan\.)?(patients|studies|reports|audit_logs|segmentation_tasks|plans)\b/i.test(
+      content
+    );
+  });
+  assert(
+    reCreating.length === 0,
+    `后续迁移不重复创建主表（001_init.sql 已建）${reCreating.length ? '，违反：' + reCreating.join(', ') : ''}`
+  );
+}
+
 
 /* ------------------------------------------------------- 13. 运行时分区默认权限 */
 /* 回归防护：fn_precreate_audit_partition() 运行时用 CREATE TABLE ... PARTITION OF

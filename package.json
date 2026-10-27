@@ -12,7 +12,7 @@
     "packages/*"
   ],
   "scripts": {
-    "lint": "npm run lint:openapi && npm run lint:schema && npm run lint:migrations && npm run lint:tokens && npm run lint:icons && npm run lint:css-vars && npm run lint:shell",
+    "lint": "npm run lint:openapi && npm run lint:schema && npm run lint:migrations && npm run lint:tokens && npm run lint:icons && npm run lint:css-vars && npm run lint:shell && npm run lint:contracts",
     "lint:openapi": "node scripts/lint_openapi.js",
     "lint:schema": "node scripts/lint_schema.js",
     "lint:migrations": "node scripts/lint_migrations.js",
@@ -28,7 +28,7 @@
     "lint:icons": "node scripts/lint_icons.js",
     "lint:css-vars": "node scripts/lint_css_vars.js",
     "lint:viewer-boundary": "node scripts/lint_viewer_boundary.js",
-    "typecheck": "npm run typecheck:web && npm run typecheck:api && npm run verify:types",
+    "typecheck": "npm run gen:types && npm run typecheck:web && npm run typecheck:api && npm run verify:types",
     "typecheck:web": "tsc --noEmit -p apps/web/tsconfig.json",
     "typecheck:api": "tsc --noEmit -p apps/api/tsconfig.json",
     "build": "npm run build:web && npm run build:api",
@@ -36,7 +36,8 @@
     "lint:publish": "node scripts/lint_publish.js",
     "lint:bundle": "node scripts/lint_bundle_size.js",
     "lint:shell": "node scripts/lint_shell_scripts.js",
-    "verify:db:local": "bash scripts/verify_db_local.sh"
+    "verify:db:local": "bash scripts/verify_db_local.sh",
+    "lint:contracts": "node scripts/lint_contracts_sync.js"
   },
   "devDependencies": {
     "js-yaml": "4.1.0",
