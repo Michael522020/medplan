@@ -31,7 +31,7 @@ jobs:
 
       # 已知警告：@cornerstonejs/codec-libjxl 声明 engines.node>=24，实为浏览器端 WASM，
       # 误报。调查过程见 docs/decisions/ADR-008.md —— 不要据此升级 Node。
-      - name: 静态断言门禁（926 条）
+      - name: 静态断言门禁
         run: npm run lint
 
       - name: 编译期合规边界门禁（13 条负向断言）
@@ -47,6 +47,46 @@ jobs:
       # 医生路径是「登录→工作台→阅片」，工作台不需要 Cornerstone。
       - name: 前端产物体积门禁
         run: npm run lint:bundle
+
+  # 新人体验守护。
+  #
+  # 2026-10-27 实测：以外部贡献者视角 clone 后跑 README 里的命令，
+  # `npm run typecheck` 直接失败 —— 契约类型不入库（按设计），
+  # 但 typecheck 脚本的 gen:types 排在最后，子任务跑时生成物还不存在。
+  #
+  # 这个 job 从**零**开始（不缓存 node_modules、不预先生成任何东西），
+  # 完整走一遍 README「快速开始」承诺的路径。
+  # 任何让新人卡住的改动都会在这里被拦住。
+  fresh-clone-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.22.2'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      # 关键：不做任何预生成，让脚本自己处理
+      - name: 类型检查（README 快速开始的第 2 步必须隐含 gen:types）
+        run: npm run typecheck
+
+      - name: 静态断言
+        run: npm run lint
+
+      - name: 构建
+        run: npm run build:web
+
+      - name: 确认生成物确实被 gitignore（契约类型不入库，防漂移）
+        run: |
+          if git ls-files --error-unmatch packages/contracts/src/generated/api-types.ts >/dev/null 2>&1; then
+            echo "::error::契约类型生成物不应入库（会与 openapi.yaml 漂移）"
+            exit 1
+          fi
+          echo "生成物未入库，符合预期"
 
   # 真实执行验证：REVOKE 是否真挡住 UPDATE、hash chain 是否真衔接。
   # 等保测评看的是「能不能跑通 + 挡不挡得住」，静态断言证明不了。
