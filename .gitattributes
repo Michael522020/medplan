@@ -1,0 +1,45 @@
+# 统一换行符，避免 Windows / Linux 混用导致的整文件 diff。
+#
+# 默认策略：仓库内一律 LF，检出时按平台转换。
+#   * text=auto        -> Git 判断文件是否为文本，是则按下面规则处理
+#   * eol=lf           -> 仓库内存储一律 LF（不随平台变化）
+#   * core.autocrlf    -> Windows 上检出为 CRLF，提交时转回 LF
+#
+# 二进制文件不做换行转换。
+
+* text=auto eol=lf
+
+# 明确指定为文本的文件
+*.ts      text eol=lf
+*.tsx     text eol=lf
+*.js      text eol=lf
+*.mjs     text eol=lf
+*.json    text eol=lf
+*.md       text eol=lf
+*.css     text eol=lf
+*.html    text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.sql     text eol=lf
+*.sh      text eol=lf
+*.py      text eol=lf
+*.txt     text eol=lf
+
+# Windows 批处理必须是 CRLF
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+*.ps1     text eol=crlf
+
+# 二进制
+*.wasm    binary
+*.png     binary
+*.jpg     binary
+*.jpeg    binary
+*.gif     binary
+*.ico     binary
+*.pdf     binary
+*.dcm     binary
+*.nii     binary
+*.nrrd    binary
+*.stl     binary
+*.glb     binary

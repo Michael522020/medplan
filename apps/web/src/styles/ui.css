@@ -1,0 +1,13 @@
+/**
+ * 按钮 / 表单 / 提示条 / 状态徽章 / 空状态。
+ *
+ * 颜色、间距、字号全部来自 design-tokens 的 CSS 变量，零硬编码色值。
+ * 规则详见 src/styles/app.css 顶部的说明。
+ */
+
+/* 按「谁在用」拆分，避免单文件超过 300 行后无从查找规则。 */
+@import './button.css';
+@import './form.css';
+@import './alert.css';
+@import './badge.css';
+@import './empty.css';

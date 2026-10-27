@@ -1,0 +1,33 @@
+{
+  "name": "@medplan/web",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MedPlan 阅片与手术规划前端。",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run typecheck && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cornerstonejs/core": "5.13.2",
+    "@cornerstonejs/dicom-image-loader": "5.13.2",
+    "@cornerstonejs/streaming-image-volume-loader": "1.86.1",
+    "@cornerstonejs/tools": "5.13.2",
+    "@medplan/contracts": "*",
+    "@medplan/design-tokens": "*",
+    "@tabler/icons-react": "3.49.0",
+    "dcmjs": "0.52.2",
+    "dicomweb-client": "0.11.3",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@vitejs/plugin-react": "6.1.2",
+    "typescript": "5.9.3",
+    "vite": "8.3.5"
+  }
+}

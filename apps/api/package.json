@@ -1,0 +1,30 @@
+{
+  "name": "@medplan/api",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MedPlan 后端服务。NestJS + Fastify，分层：controllers -> services -> repositories，依赖只向下。",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "npm run typecheck",
+    "start": "node --experimental-strip-types src/main.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@medplan/contracts": "*",
+    "@nestjs/common": "12.2.0",
+    "@nestjs/config": "12.0.1",
+    "@nestjs/core": "12.2.0",
+    "@nestjs/platform-fastify": "12.2.0",
+    "fastify": "5.12.7",
+    "pg": "8.23.1",
+    "reflect-metadata": "0.2.2",
+    "rxjs": "7.8.2"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/pg": "8.23.1",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}

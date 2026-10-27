@@ -1,0 +1,73 @@
+/**
+ * 签名锁定遮罩。
+ *
+ * 颜色、间距、字号全部来自 design-tokens 的 CSS 变量，零硬编码色值。
+ * 规则详见 src/styles/app.css 顶部的说明。
+ */
+
+/* ---- 锁定遮罩 ---- */
+
+.lock-overlay {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-6) var(--space-4);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-sm);
+  background: var(--color-lock-overlay);
+  text-align: center;
+}
+
+.lock-overlay__title {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: var(--font-weight-medium);
+}
+
+.lock-overlay__description {
+  margin: 0;
+  max-width: 60ch;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.lock-overlay__actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.lock-overlay__action {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  height: var(--control-min-size);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-primary);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.lock-overlay__action:hover {
+  background: var(--color-surface-hover);
+}
+
+.lock-overlay--signed {
+  color: var(--color-text-primary);
+}
+
+.lock-overlay--invalid {
+  border-color: var(--color-status-critical);
+  background: var(--color-status-critical-subtle);
+  color: var(--color-status-critical);
+}
+
+.lock-overlay--archived {
+  color: var(--color-text-secondary);
+}

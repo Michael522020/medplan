@@ -1,0 +1,123 @@
+/**
+ * 右侧面板与通用面板。
+ *
+ * 颜色、间距、字号全部来自 design-tokens 的 CSS 变量，零硬编码色值。
+ * 规则详见 src/styles/app.css 顶部的说明。
+ */
+
+/* ---- 序列列表 ---- */
+
+.series-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.series-list__empty {
+  padding: var(--space-4);
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+}
+
+.phase-group {
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+.phase-group__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  height: 28px;
+  padding: 0 var(--space-2);
+  background: var(--color-surface-sunken);
+  font-size: var(--text-xs);
+}
+
+.phase-group__title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-weight: var(--font-weight-medium);
+}
+
+.phase-group--plain .phase-group__title {
+  color: var(--color-phase-plain);
+}
+
+.phase-group--arterial .phase-group__title {
+  color: var(--color-phase-arterial);
+}
+
+.phase-group--portal .phase-group__title {
+  color: var(--color-phase-venous);
+}
+
+.phase-group--venous .phase-group__title {
+  color: var(--color-phase-venous);
+}
+
+.phase-group--delayed .phase-group__title {
+  color: var(--color-phase-delayed);
+}
+
+.phase-group--unknown .phase-group__title {
+  color: var(--color-phase-unknown);
+}
+
+.phase-group__confidence {
+  color: var(--color-text-tertiary);
+}
+
+.phase-group__notice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-status-critical-subtle);
+  color: var(--color-status-warning);
+  font-size: var(--text-2xs);
+}
+
+.phase-group__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.series-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  width: 100%;
+  min-height: 56px;
+  padding: var(--space-2);
+  border: none;
+  border-bottom: 1px solid var(--color-border-subtle);
+  background: transparent;
+  color: var(--color-text-primary);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.series-item:hover {
+  background: var(--color-table-row-hover);
+}
+
+.series-item--selected {
+  background: var(--color-table-row-selected);
+  box-shadow: inset 2px 0 0 var(--color-accent-clinical);
+}
+
+.series-item__description {
+  font-size: var(--text-sm);
+}
+
+.series-item__meta {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-2xs);
+}

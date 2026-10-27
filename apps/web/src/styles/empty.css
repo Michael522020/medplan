@@ -1,0 +1,42 @@
+/**
+ * 空状态。
+ *
+ * 颜色、间距、字号全部来自 design-tokens 的 CSS 变量，零硬编码色值。
+ * 规则详见 src/styles/app.css 顶部的说明。
+ */
+
+/* ------------------------------------------------------------------ *
+ * 空状态
+ * ------------------------------------------------------------------ */
+
+.empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-8) var(--space-4);
+  text-align: center;
+  color: var(--color-text-secondary);
+}
+
+.empty-state__title {
+  margin: 0;
+  color: var(--color-text-primary);
+  font-size: var(--text-lg);
+  font-weight: var(--font-weight-medium);
+}
+
+.empty-state__description {
+  margin: 0;
+  max-width: 60ch;
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.empty-state__action {
+  margin-top: var(--space-2);
+}
+
+.empty-state--forbidden {
+  color: var(--color-text-tertiary);
+}

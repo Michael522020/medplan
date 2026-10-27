@@ -1,0 +1,64 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+build/
+*.tsbuildinfo
+.vite/
+
+# 契约生成的类型产物。
+# 由 `npm run gen:types` 从 docs/openapi.yaml 生成，不入库避免与契约不同步。
+api-types.generated.ts
+packages/contracts/src/generated/
+
+# 环境变量与凭证 —— 绝不入库
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+secrets/
+credentials/
+
+# 日志与运行时产物
+logs/
+*.log
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# 临时验证目录（后端启动自检用，编译产物）
+.bootcheck/
+
+# 测试与覆盖率
+coverage/
+.nyc_output/
+test-results/
+playwright-report/
+
+# 编辑器与操作系统
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# 临时文件
+tmp/
+temp/
+*.tmp
+*.bak
+*.orig
+*.rej
+
+# 本地数据库与存储
+*.sqlite
+*.sqlite3
+*.db
+pgdata/

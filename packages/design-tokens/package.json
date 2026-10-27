@@ -1,0 +1,16 @@
+{
+  "name": "@medplan/design-tokens",
+  "version": "1.0.0",
+  "private": true,
+  "description": "设计 Token 唯一分发源。改 Token 只改 docs/design-tokens.json 并重跑 scripts/build_tokens.py，禁止手改本目录下的 CSS。",
+  "main": "./tokens.css",
+  "style": "./tokens.css",
+  "exports": {
+    ".": {
+      "style": "./tokens.css",
+      "default": "./tokens.css"
+    },
+    "./tokens.css": "./tokens.css",
+    "./tokens.json": "./tokens.json"
+  }
+}

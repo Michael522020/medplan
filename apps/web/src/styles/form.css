@@ -1,0 +1,138 @@
+/**
+ * 表单字段与输入控件。
+ *
+ * 颜色、间距、字号全部来自 design-tokens 的 CSS 变量，零硬编码色值。
+ * 规则详见 src/styles/app.css 顶部的说明。
+ */
+
+/* ------------------------------------------------------------------ *
+ * 表单
+ * ------------------------------------------------------------------ */
+
+.input {
+  width: 100%;
+  height: var(--control-min-size);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--color-input-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-input-bg);
+  color: var(--color-input-text);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  transition: border-color var(--motion-fast) var(--ease-standard);
+}
+
+.input::placeholder {
+  color: var(--color-input-placeholder);
+}
+
+.input:focus-visible {
+  border-color: var(--color-accent-clinical);
+}
+
+.input:disabled {
+  background: var(--color-input-disabled-bg);
+  color: var(--color-text-disabled);
+}
+
+.input--compact {
+  height: 24px;
+  padding: 0 var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.input-group {
+  display: flex;
+  align-items: stretch;
+  position: relative;
+}
+
+.input-group__control {
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+
+.input-group__addon,
+.input-group__prefix {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--color-input-border);
+  background: var(--color-surface-sunken);
+  color: var(--color-text-secondary);
+}
+
+.input-group__addon {
+  width: var(--control-min-size);
+  border-left: none;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  cursor: pointer;
+}
+
+.input-group__addon:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+}
+
+.input-group__prefix {
+  padding: 0 var(--space-2);
+  border-right: none;
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+}
+
+.input-group--search .input-group__control {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.select {
+  height: var(--control-min-size);
+  padding: 0 var(--space-2);
+  border: 1px solid var(--color-input-border);
+  border-radius: var(--radius-sm);
+  background: var(--color-input-bg);
+  color: var(--color-input-text);
+  font-family: inherit;
+  font-size: var(--text-sm);
+}
+
+.select--compact {
+  height: 24px;
+  font-size: var(--text-xs);
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.field__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.field__label {
+  font-size: var(--text-sm);
+  color: var(--color-text-secondary);
+}
+
+.field__footer {
+  /* 预留固定高度，错误出现时不撑破布局（CLS < 0.1） */
+  min-height: var(--space-4);
+}
+
+.field__error {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin: 0;
+  color: var(--color-status-critical);
+  font-size: var(--text-xs);
+}
+
+.field__hint {
+  margin: 0;
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+}

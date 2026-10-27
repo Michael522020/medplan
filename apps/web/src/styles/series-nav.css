@@ -1,0 +1,54 @@
+/**
+ * 序列导航条。
+ *
+ * 颜色、间距、字号全部来自 design-tokens 的 CSS 变量，零硬编码色值。
+ * 规则详见 src/styles/app.css 顶部的说明。
+ */
+
+/* ---- 工具条 ---- */
+
+.viewer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-1);
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-sm);
+  /* 浮动工具条默认半透明，不遮挡影像 */
+  background: var(--color-surface-overlay);
+  opacity: 0.92;
+}
+
+.viewer-toolbar__button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.viewer-toolbar__button:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+}
+
+.viewer-toolbar__button--active {
+  background: var(--color-surface-selected);
+  color: var(--color-accent-clinical);
+  /* 左侧 2px 强调指示条 */
+  box-shadow: inset 2px 0 0 var(--color-accent-clinical);
+}
+
+.viewer-toolbar__button--disabled {
+  color: var(--color-text-disabled);
+  cursor: not-allowed;
+}

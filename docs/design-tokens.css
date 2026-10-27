@@ -1,0 +1,346 @@
+/* ============================================================
+ * MedPlan Design Tokens
+ * 本文件由 scripts/build_tokens.py 从 design-tokens.json 自动生成，请勿手改。
+ * 修改 Token 请编辑脚本内的结构体后重新运行。
+ * 图标库：Tabler Icons 3.49.0 (MIT) — 唯一图标库，禁止 emoji / 禁止混用
+ * ============================================================ */
+
+:root {
+  color-scheme: light;
+
+  /* ---- Surface（表面层）---- */
+  --color-surface-canvas: #1A1A1A;
+  --color-surface-app: #F5F7F8;
+  --color-surface-panel: #FFFFFF;
+  --color-surface-raised: #FFFFFF;
+  --color-surface-overlay: #FFFFFF;
+  --color-surface-sunken: #E7EBED;
+  --color-surface-hover: #EDF1F2;
+  --color-surface-active: #E1E7EA;
+  --color-surface-selected: #D3DEE9;
+
+  /* ---- Border（边框层）---- */
+  --color-border-subtle: #E7EBED;
+  --color-border-default: #CBD2D7;
+  --color-border-strong: #7A858F;
+
+  /* ---- Foreground（前景层）---- */
+  --color-text-primary: #0F1519;
+  --color-text-secondary: #454F58;
+  --color-text-tertiary: #5A656F;
+  --color-text-disabled: #A3ADB5;
+  --color-text-on-accent: #FFFFFF;
+  --color-text-on-canvas: #E8EDF0;
+
+  /* ---- Accent（临床强调色，Teal，非紫非粉）---- */
+  --color-accent-clinical: #1E3A5F;
+  --color-accent-clinical-hover: #2C3E50;
+  --color-accent-clinical-active: #152A45;
+  --color-accent-clinical-subtle: #D3DEE9;
+
+  /* ---- Status（临床安全色：必须颜色+图标+文字三重编码）---- */
+  --color-status-critical: #C81E1E;
+  --color-status-critical-subtle: #FDECEC;
+  --color-status-abnormal: #B45309;
+  --color-status-warning: #8A5200;
+  --color-status-normal: #15803D;
+  --color-status-info: #1D4ED8;
+
+  /* ---- Focus & Overlay ---- */
+  --color-focus-ring: #1E3A5F;
+  --color-overlay-crosshair: #1E3A5F;
+  --color-shadow-ambient: rgba(15,21,25,0.32);
+
+  /* ---- 组件层颜色 ---- */
+  --color-button-danger-bg: #C81E1E;
+  --color-button-danger-hover: #A81717;
+  --color-button-danger-text: #FFFFFF;
+  --color-button-ghost-hover: #EDF1F2;
+  --color-button-ghost-text: #454F58;
+  --color-button-primary-active: #152A45;
+  --color-button-primary-bg: #1E3A5F;
+  --color-button-primary-hover: #2C3E50;
+  --color-button-primary-text: #FFFFFF;
+  --color-button-secondary-bg: #FFFFFF;
+  --color-button-secondary-border: #7A858F;
+  --color-button-secondary-hover: #EDF1F2;
+  --color-button-secondary-text: #1E3A5F;
+  --color-confirm-done: #15803D;
+  --color-confirm-modified: #1D4ED8;
+  --color-confirm-pending: #8A5200;
+  --color-critical-banner-bg: #FDECEC;
+  --color-critical-banner-border: #C81E1E;
+  --color-critical-banner-text: #A81717;
+  --color-disclaimer-bar-bg: #EDF1F2;
+  --color-input-bg: #FFFFFF;
+  --color-input-border: #7A858F;
+  --color-input-disabled-bg: #E7EBED;
+  --color-input-error-border: #C81E1E;
+  --color-input-error-ring: #FDECEC;
+  --color-input-placeholder: #5A656F;
+  --color-input-text: #0F1519;
+  --color-lock-overlay: rgba(15,21,25,0.04);
+  --color-phase-arterial: #1E3A5F;
+  --color-phase-delayed: #A83E80;
+  --color-phase-plain: #454F58;
+  --color-phase-unknown: #8A5200;
+  --color-phase-venous: #0E6157;
+  --color-readonly-bg: #E7EBED;
+  --color-readonly-border: #A3ADB5;
+  --color-skeleton-base: #E7EBED;
+  --color-skeleton-highlight: #F5F7F8;
+  --color-table-border: #E7EBED;
+  --color-table-header-bg: #F5F7F8;
+  --color-table-row-hover: #EDF1F2;
+  --color-table-row-selected: #E1E7EA;
+
+  /* ---- Typography ---- */
+  --font-ui: Inter, "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  --font-display: Inter, "Noto Sans SC", "PingFang SC", sans-serif;
+  --font-mono: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+
+  --text-2xs: 10px;   /* line-height: 1.4; font-weight: 500; DICOM 角标、序列序号 */
+  --text-xs: 11px;   /* line-height: 1.5; font-weight: 400; 标签、单位、图例 */
+  --text-sm: 12px;   /* line-height: 1.5; font-weight: 400; 次级正文、面板标题、时间戳 */
+  --text-base: 13px;   /* line-height: 1.6; font-weight: 400; 正文基准（阅片工具默认） */
+  --text-md: 14px;   /* line-height: 1.6; font-weight: 400; 报告编辑正文 */
+  --text-lg: 16px;   /* line-height: 1.5; font-weight: 500; 区块标题 */
+  --text-xl: 20px;   /* line-height: 1.4; font-weight: 590; 页面标题、患者姓名 */
+  --text-2xl: 24px;   /* line-height: 1.3; font-weight: 590; 登录页标题 */
+  --text-3xl: 32px;   /* line-height: 1.2; font-weight: 590; 危急值弹窗标题 */
+
+  --font-weight-regular: 400;
+  --font-weight-medium: 500;
+  --font-weight-semibold: 590;
+
+  --tracking-body: 0;
+  --tracking-small: 0.01em;
+  --tracking-caps: 0.08em;
+  --tracking-heading: -0.01em;
+
+  /* 等宽数字：所有临床数值强制应用（P4 数字必须稳定）*/
+  --number-font-feature: "tnum" 1, "zero" 1;
+  --number-font-family: var(--font-mono);
+  --number-text-align: right;
+
+  /* ---- Spacing（4px 网格，仅允许 4/8/12/16/20/24/32/40/48）---- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* ---- Radius（医疗语境克制，上限 lg=12px）---- */
+  --radius-none: 0;
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 12px;
+  --radius-full: 9999px;
+
+  /* ---- Elevation（亮色：极轻投影，blur <= 12px）---- */
+  --elevation-0: #F5F7F8;
+  --elevation-1: #FFFFFF;
+  --elevation-2: #FFFFFF;
+  --elevation-3: #FFFFFF;
+  --elevation-shadow: 0 1px 2px rgba(15,21,25,0.06), 0 4px 12px rgba(15,21,25,0.08);
+  --elevation-shadow-lg: 0 8px 28px rgba(15,21,25,0.14);
+
+  /* ---- Z-index ---- */
+  --z-base: 0;
+  --z-sticky: 100;
+  --z-drawer: 200;
+  --z-dropdown: 300;
+  --z-modal: 400;
+  --z-toast: 500;
+  --z-critical-alert: 600;
+
+  /* ---- Icon（唯一图标库：Tabler Icons 3.49.0）---- */
+  --icon-size-inline: 16px;
+  --icon-size-button: 20px;
+  --icon-size-standalone: 24px;
+  --icon-size-lg: 32px;
+  --icon-stroke-width: 2;
+  --icon-stroke-width-sm: 1.75;
+
+  /* ---- Motion（功能动效，无装饰；上限 300ms）---- */
+  --motion-instant: 50ms;
+  --motion-fast: 150ms;
+  --motion-base: 200ms;
+  --motion-screen: 300ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0, 1);
+
+  /* ---- Layout ---- */
+  --viewer-canvas-min-ratio: 70%;
+  --toolbar-height: 40px;
+  --statusbar-height: 40px;
+  --series-nav-height: 32px;
+  --sidebar-left-width: 288px;
+  --sidebar-right-width: 320px;
+  --touch-target-min: 44px;
+  --control-min-size: 32px;
+
+  /* ---- Breakpoint（仅文档用，媒体查询请直接写断点值）---- */
+  --bp-tablet: 1024px;
+  --bp-tabletPortrait: 768px;
+  --bp-laptop: 1280px;
+  --bp-viewerMin: 1440px;
+  --bp-2k: 2560px;
+  --bp-4k: 3840px;
+}
+
+/* 暗色主题：阅片默认。两套主题各自独立设计，非互相反转（P8）*/
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  /* ---- Surface ---- */
+  --color-surface-canvas: #000000;
+  --color-surface-app: #0C1116;
+  --color-surface-panel: #161C21;
+  --color-surface-raised: #242B32;
+  --color-surface-overlay: #2D353D;
+  --color-surface-sunken: #050809;
+  --color-surface-hover: #1F262D;
+  --color-surface-active: #2A333B;
+  --color-surface-selected: #16243A;
+
+  /* ---- Border ---- */
+  --color-border-subtle: #242B32;
+  --color-border-default: #343C44;
+  --color-border-strong: #5F6B76;
+
+  /* ---- Foreground ---- */
+  --color-text-primary: #E8EDF0;
+  --color-text-secondary: #A3ADB5;
+  --color-text-tertiary: #7A858F;
+  --color-text-disabled: #5A656F;
+  --color-text-on-accent: #FFFFFF;
+  --color-text-on-canvas: #E8EDF0;
+
+  /* ---- Accent（暗色下提明度、降饱和，防视觉振动）---- */
+  --color-accent-clinical: #63A6DC;
+  --color-accent-clinical-hover: #7CBAE8;
+  --color-accent-clinical-active: #4A8AC0;
+  --color-accent-clinical-subtle: #16243A;
+
+  /* ---- Status ---- */
+  --color-status-critical: #FF6B6B;
+  --color-status-critical-subtle: #3D0F0F;
+  --color-status-abnormal: #E8A33D;
+  --color-status-warning: #F59E0B;
+  --color-status-normal: #3FB950;
+  --color-status-info: #4D9DE0;
+
+  /* ---- Focus & Overlay（暗背景焦点环改青色，禁用蓝色）---- */
+  --color-focus-ring: #7CBAE8;
+  --color-overlay-crosshair: #8FC2E8;
+  --color-shadow-ambient: rgba(0,0,0,0.55);
+
+  /* ---- 组件层颜色 ---- */
+  --color-button-danger-bg: #B01616;
+  --color-button-danger-hover: #C81E1E;
+  --color-button-danger-text: #FFFFFF;
+  --color-button-ghost-hover: #1F262D;
+  --color-button-ghost-text: #A3ADB5;
+  --color-button-primary-active: #28527D;
+  --color-button-primary-bg: #2E5F8F;
+  --color-button-primary-hover: #3A72A8;
+  --color-button-primary-text: #FFFFFF;
+  --color-button-secondary-bg: #242B32;
+  --color-button-secondary-border: #5F6B76;
+  --color-button-secondary-hover: #2D353D;
+  --color-button-secondary-text: #8FC2E8;
+  --color-confirm-done: #3FB950;
+  --color-confirm-modified: #4D9DE0;
+  --color-confirm-pending: #F59E0B;
+  --color-critical-banner-bg: #3D0F0F;
+  --color-critical-banner-border: #FF6B6B;
+  --color-critical-banner-text: #FF6B6B;
+  --color-disclaimer-bar-bg: #1B2A3D;
+  --color-input-bg: #050809;
+  --color-input-border: #5F6B76;
+  --color-input-disabled-bg: #161C21;
+  --color-input-error-border: #FF6B6B;
+  --color-input-error-ring: #3D0F0F;
+  --color-input-placeholder: #5A656F;
+  --color-input-text: #E8EDF0;
+  --color-lock-overlay: rgba(0,0,0,0.28);
+  --color-phase-arterial: #63A6DC;
+  --color-phase-delayed: #D16BAE;
+  --color-phase-plain: #A3ADB5;
+  --color-phase-unknown: #F59E0B;
+  --color-phase-venous: #4FB8A0;
+  --color-readonly-bg: #1A2028;
+  --color-readonly-border: #5F6B76;
+  --color-skeleton-base: #242B32;
+  --color-skeleton-highlight: #2D353D;
+  --color-table-border: #242B32;
+  --color-table-header-bg: #161C21;
+  --color-table-row-hover: #1F262D;
+  --color-table-row-selected: #1F262D;
+
+  /* ---- Elevation（暗色靠亮度递进，默认无阴影）---- */
+  --elevation-0: #0C1116;
+  --elevation-1: #161C21;
+  --elevation-2: #242B32;
+  --elevation-3: #2D353D;
+  --elevation-shadow: none;
+  --elevation-shadow-lg: none;
+}
+
+/* ---------- 基础重置：数值必须稳定（P4）---------- */
+*,
+*::before,
+*::after { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  padding: 0;
+  background: var(--color-surface-app);
+  color: var(--color-text-primary);
+  font-family: var(--font-ui);
+  font-size: var(--text-base);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 临床数值统一应用等宽数字 + 右对齐 */
+.numeric,
+[data-numeric],
+input[type="number"] {
+  font-family: var(--number-font-family);
+  font-variant-numeric: var(--number-font-feature);
+  text-align: var(--number-text-align);
+}
+
+/* 焦点可见：永不移除 outline。危急值弹窗默认焦点 */
+:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* 图标统一：继承文字色，颜色不硬编码 */
+svg[class*="icon"],
+[class*="icon-"] svg {
+  stroke: currentColor;
+  fill: none;
+  stroke-width: var(--icon-stroke-width);
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* 动效收敛：尊重系统减弱动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

@@ -1,0 +1,113 @@
+/**
+ * 按钮。
+ *
+ * 颜色、间距、字号全部来自 design-tokens 的 CSS 变量，零硬编码色值。
+ * 规则详见 src/styles/app.css 顶部的说明。
+ */
+
+/* ------------------------------------------------------------------ *
+ * 按钮
+ * ------------------------------------------------------------------ */
+
+.btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-4);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: var(--text-sm);
+  line-height: 1;
+  cursor: pointer;
+  transition:
+    background-color var(--motion-fast) var(--ease-standard),
+    border-color var(--motion-fast) var(--ease-standard),
+    color var(--motion-fast) var(--ease-standard);
+}
+
+.btn--sm {
+  height: 28px;
+  padding: 0 var(--space-3);
+  font-size: var(--text-xs);
+}
+
+.btn--md {
+  height: var(--control-min-size);
+}
+
+.btn--lg {
+  height: 40px;
+  padding: 0 var(--space-5);
+  font-size: var(--text-md);
+}
+
+.btn--primary {
+  background: var(--color-button-primary-bg);
+  color: var(--color-button-primary-text);
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--color-button-primary-hover);
+}
+
+.btn--primary:active:not(:disabled) {
+  background: var(--color-button-primary-active);
+}
+
+.btn--secondary {
+  background: var(--color-button-secondary-bg);
+  border-color: var(--color-button-secondary-border);
+  color: var(--color-button-secondary-text);
+}
+
+.btn--secondary:hover:not(:disabled) {
+  background: var(--color-button-secondary-hover);
+}
+
+.btn--ghost {
+  background: transparent;
+  color: var(--color-button-ghost-text);
+}
+
+.btn--ghost:hover:not(:disabled) {
+  background: var(--color-button-ghost-hover);
+}
+
+.btn--danger {
+  background: var(--color-button-danger-bg);
+  color: var(--color-button-danger-text);
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: var(--color-button-danger-hover);
+}
+
+.btn:disabled,
+.btn--aria-disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.btn--aria-disabled {
+  opacity: 1;
+  color: var(--color-text-disabled);
+  background: var(--color-surface-sunken);
+  border-color: var(--color-border-default);
+}
+
+/**
+ * 触控热区外扩到 44px，但不改变视觉尺寸。
+ * 32px 的按钮用伪元素把可点区域撑到 44px（WCAG 2.5.5）。
+ */
+.btn::after {
+  content: '';
+  position: absolute;
+  inset: 50% 0 0 50%;
+  width: 100%;
+  height: var(--touch-target-min);
+  transform: translate(-50%, -50%);
+  min-width: var(--touch-target-min);
+}

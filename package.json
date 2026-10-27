@@ -1,0 +1,49 @@
+{
+  "name": "medplan",
+  "version": "1.0.0",
+  "private": true,
+  "description": "MedPlan — 企业级医学影像阅片与手术规划系统。等保三级 + 卫健委电子病历规范。",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.12.0 <23"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "lint": "npm run lint:openapi && npm run lint:schema && npm run lint:migrations && npm run lint:tokens && npm run lint:icons && npm run lint:css-vars && npm run lint:viewer-boundary",
+    "lint:openapi": "node scripts/lint_openapi.js",
+    "lint:schema": "node scripts/lint_schema.js",
+    "lint:migrations": "node scripts/lint_migrations.js",
+    "lint:tokens": "node scripts/lint_tokens.js",
+    "gen:types": "node scripts/gen_types.js",
+    "verify:types": "npm run gen:types && tsc --project tsconfig.json",
+    "verify:db": "bash scripts/verify_db.sh",
+    "test": "npm run lint && npm run typecheck",
+    "build:web": "npm run build -w @medplan/web",
+    "build:api": "npm run build -w @medplan/api",
+    "dev:web": "npm run dev -w @medplan/web",
+    "dev:api": "npm run dev -w @medplan/api",
+    "lint:icons": "node scripts/lint_icons.js",
+    "lint:css-vars": "node scripts/lint_css_vars.js",
+    "lint:viewer-boundary": "node scripts/lint_viewer_boundary.js",
+    "typecheck": "npm run typecheck:web && npm run typecheck:api && npm run verify:types",
+    "typecheck:web": "tsc --noEmit -p apps/web/tsconfig.json",
+    "typecheck:api": "tsc --noEmit -p apps/api/tsconfig.json",
+    "build": "npm run build:web && npm run build:api",
+    "recall:pitfalls": "node scripts/recall_pitfalls.js",
+    "lint:publish": "node scripts/lint_publish.js",
+    "lint:bundle": "node scripts/lint_bundle_size.js"
+  },
+  "devDependencies": {
+    "js-yaml": "4.1.0",
+    "openapi-typescript": "7.4.4",
+    "typescript": "5.9.3"
+  },
+  "author": "Michael",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Michael522020/medplan.git"
+  }
+}

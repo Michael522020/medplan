@@ -1,0 +1,42 @@
+/**
+ * 工具类（sr-only / spin）。
+ *
+ * 颜色、间距、字号全部来自 design-tokens 的 CSS 变量，零硬编码色值。
+ * 规则详见 src/styles/app.css 顶部的说明。
+ */
+
+/* ------------------------------------------------------------------ *
+ * 工具类
+ * ------------------------------------------------------------------ */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.spin {
+  animation: spin 1.1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/**
+ * 减少动效偏好下动效归零（UIUX-P2 §8 第 15 条）。
+ * spinner 降为静态图标 —— 纯 CSS 无法换图标，但旋转停止后仍有形状提示。
+ */
+@media (prefers-reduced-motion: reduce) {
+  .spin {
+    animation: none;
+  }
+}

@@ -1,0 +1,4688 @@
+openapi: 3.0.3
+
+info:
+  title: MedPlan API
+  version: 1.0.0
+  description: |
+    # MedPlan — 企业级医学影像阅片与手术规划系统
+
+    本文件是**前后端唯一契约**。前端类型由本文件生成（`openapi-typescript`），
+    后端 DTO 与参数校验由本文件生成或逐条对齐。实现与本文件冲突时，先改本文件再改代码。
+
+    ---
+
+    ## 0. 版本与文档效力
+
+    | 项 | 值 |
+    |----|----|
+    | 契约版本 | 1.0.0（对应 docs/Spec.md 2026-10-22 锁定版） |
+    | 上游依据 | docs/Spec.md §5 端点清单（锁定）、docs/架构方案.md §7.6 错误码、§10.1 三层权限 |
+    | 生成物 | 前端 `src/services/api-types.ts`（禁止手写重复类型） |
+    | 变更流程 | 任何端点/字段变更必须先改本文件，经 Team Lead 同步前后端 |
+
+    ## 1. 统一响应包裹
+
+    所有端点（成功与失败）均返回同一结构：
+
+    - 成功：`{ "code": 0, "data": { ... }, "message": "" }`
+    - 失败：`{ "code": 10001, "data": null, "message": "..." , "traceId": "..." }`
+
+    前端**禁止**依据 HTTP 状态码做业务分支，只依据 `code`。
+
+    ## 2. 幂等约定
+
+    Spec §5 标注「幂等 = 是」的 5 个端点，`Idempotency-Key` header 为**必填**：
+
+    | 端点 | 幂等理由 |
+    |------|---------|
+    | POST /segmentation-tasks | 重提不产生重复 GPU 计算（Redis Stream 至少一次投递） |
+    | POST /segmentation-tasks/{taskId}/confirm | 重复点击确认不产生重复确认记录 |
+    | POST /plans | 双击保存不产生两份规划方案 |
+    | PUT /plans/{planId} | 重试不产生多余版本 |
+    | POST /reports/{reportId}/sign | 重复提交不产生重复签名与重复流水号 |
+
+    **不携带 `Idempotency-Key` 的两个 POST**（依据 Spec §5 幂等列判定，不做超范围施加）：
+
+    | 端点 | 不要求的原因 |
+    |------|-------------|
+    | POST /auth/login | Spec §5 幂等 = 否。登录幂等会导致会话复用，反而削弱双因素语义 |
+    | POST /wado/instances | 本质是只读取图（Spec §5 幂等 = 否）。取图幂等由 HTTP 缓存与 Cornerstone 影像缓存保证，施加业务幂等键只会增加阅片首帧延迟（AC-05 首帧 ≤3s） |
+
+    幂等键语义：同一 `Idempotency-Key` + 同一请求体 -> 返回首次结果，`HTTP 200` +
+    `data.idempotentReplay = true`（首次创建为 `201`）；同一 `Idempotency-Key` +
+    **不同**请求体 -> `code 10001`（幂等键冲突）。幂等记录保留 24 小时。
+
+    ## 3. 认证与双因素
+
+    - 会话：`Authorization: Bearer <access_token>`，JWT，由 Keycloak 26.8.1 OIDC 签发。
+    - 第二因素：**UKey 数字证书**（SM2），口令 + UKey 双因素。短信验证码不可替代（ADR-005）。
+    - `access_token` 载荷含 `ukey_cert_serial`，即会话本身已绑定 UKey；
+      **签名动作**（POST /reports/{reportId}/sign）需**再次**出示 UKey 并对本次摘要签名，
+      因为签名是法律行为，须逐次意思表示（WS/T 847—2024 签名超时机制：前端 5 分钟无操作须重新认证）。
+
+    ## 4. 错误码（Spec §5 锁定 + 架构方案 §7.6 分段）
+
+    | code | 含义 | HTTP | 说明 |
+    |------|------|------|------|
+    | 0 | 成功 | 200 / 201 | — |
+    | 10001 | 参数错误 | 400 | 含幂等键冲突、枚举非法、长度越界 |
+    | 10002 | 未认证 | 401 | Token 缺失、过期、签名不合法 |
+    | 10003 | 无权限（角色级） | 403 | RBAC 判定失败，与患者是否存在无关 |
+    | **10004** | **越权（数据级）** | **404** | **响应时间、状态码、响应体大小三者须与「患者不存在」不可区分** |
+    | 10005 | 资源不存在 | 404 | 仅用于**非 PHI 导航**资源（UUID v7 不可枚举），见下方安全设计 |
+    | 20001 | 业务校验失败 | 422 | 语义合法但业务不成立 |
+    | 20002 | 业务前置不满足 | 422 | 如平扫提交肝胆分割、未完成 AI 确认即提交报告 |
+    | **20003** | **乐观锁版本冲突** | **409** | **本契约新增**，Spec §5 未定义；对应 AC-07 与架构方案 12.2 E7「版本冲突返回 409」 |
+    | 30001 | PACS 不可达 | 503 | dcm4chee 或 DICOMweb 上游异常 |
+    | 30002 | 检查/序列不存在于 PACS | 404 | 业务库有元数据但 PACS 无归档对象 |
+    | 30003 | 序列拉取失败 | 502 | 取图过程失败，须返回已加载层数供前端提示 |
+    | 40001 | AI 队列已满 | 429 | — |
+    | 40002 | AI 推理失败 | 500 | 必须返回失败环节，禁止以空模型冒充成功 |
+    | **40003** | **模型许可不在白名单** | **400** | **启动强校验，非 Apache-2.0 白名单拒绝并审计**（AC-09） |
+    | 40004 | 模型版本不匹配 | 409 | 权重版本与锁定 2.18.0 不符 |
+    | 50001 | 报告未审核不可签名 | 409 | — |
+    | 50002 | 签名服务不可达 | 503 | 密码机或 TSA 不可用 |
+    | 50003 | 签名后编辑被拒 | 409 | 签名失效（AC-14） |
+    | 50004 | 归档后修改需审批 | 409 | — |
+    | 90001 | 内部错误 | 500 | **不得暴露堆栈、SQL、内部主机名** |
+
+    ### 4.1 越权不可区分的实现规则（安全设计，非风格偏好）
+
+    Spec §5 要求 10004 与「患者不存在」不可区分。若两者 `code` 不同，攻击者读 `code`
+    即可判断患者在本院是否存在检查 —— 泄露成立。因此本契约按**资源类别**把两个码
+    互斥化，使**任何可由 PHI 导航到的路径上只有一个码**：
+
+    | 资源类别 | 端点 | 不存在时 | 越权时 | 可区分性 |
+    |---------|------|---------|-------|---------|
+    | PHI 可导航（经患者/检查/就诊到达） | GET /studies、GET /studies/{studyUid}/series、POST /wado/instances、POST/PUT /plans | **10004** | **10004** | 无。同一码、同一 HTTP 404、同一 message 字面量、响应体字节数相同 |
+    | 非 PHI 导航（主键为 UUID v7，122 bit 熵，不可枚举） | GET /segmentation-tasks/{taskId}、GET /reports/{reportId}、POST /.../confirm、POST /.../sign、PUT /plans/{planId} | **10005** | **10004** | 攻击者无法构造有效 UUID v7，不构成患者存在性预言机 |
+
+    实现要求（后端）：
+    1. 上述两类响应使用**同一段常量 message 字符串**，禁止拼接资源名或患者名。
+    2. 命中 10004 前必须先执行一次等价的数据库探测（查询恒定返回同一索引路径），
+       使两条路径的耗时分布一致；响应不得提前返回。
+    3. 侧信道专项测试列入验收：1000 次采样，「越权」与「不存在」的响应时间 p99 差异 < 20%（架构方案 12.3 C-3）。
+
+    ## 5. 审计标注
+
+    - `x-audit: true` 表示后端**必须**挂审计拦截器，审计写入失败则整个请求失败（不允许静默丢弃审计）。
+    - `x-audit-event` 为事件类型枚举，落 `audit_logs.event_type`。
+    - `x-audit-phi` 表示该端点是否返回患者可识别信息（PHI）。审计查询端点自身 `x-audit-phi: true`，
+      因为其响应含患者标识与操作人标识。
+    - 失败路径（越权拒绝）**同样写审计**（架构方案 10.4）。
+
+    ## 6. AI 合规边界（强约束）
+
+    依据《人工智能医疗器械注册审查指导原则》（器审中心 2022 年第 8 号）：
+
+    - 本系统 AI 能力（自动分割、量化测量、三维重建）属**非辅助决策类**，不触及三类证。
+    - **AI 输出 schema 中不存在任何自由文本字段**，因此在类型层面不可能承载诊断结论。
+      `SegmentationStructure` 只含解剖结构名与量化体积，`additionalProperties: false`。
+    - **禁止出现** `nature` / `diagnosis` / `malignancy` / `benign` / `impression` /
+      `suggestion` / `recommendation` / `conclusion` / `comment` 等字段。
+    - AI 相关字段**只能**出现在报告的 `aiAssist` 分组内，且该分组只承载结构化引用
+      （结构名 + 体积 + 确认医师 + 确认时间），不承载任何结论性文本。
+    - 诊断意见 `impression` 的 `authoredBy` 恒为执业医师，无 AI 作者分支。
+    - 全部 AI 输出必须附带固定声明串（`AI_DISCLAIMER`），前端不可折叠、不可关闭。
+
+    ## 7. 数据脱敏
+
+    - 响应中的患者姓名一律掩码（`张*明`），完整姓名仅在质控/病案角色下由后端按
+      `x-deidentify: false` 请求头单独放行，且该路径强制写审计。
+    - 身份证**只返回掩码**（`310***********1234`），后端不提供返回明文的接口。
+    - 手机号后端不返回（前端无此展示需求）。
+
+  contact:
+    name: MedPlan 架构（高见远）
+    email: architecture@medplan.internal.example
+  license:
+    name: 院内私有化交付，LicenseRef-Proprietary
+
+servers:
+  - url: https://medplan.hospital.internal
+    description: 院内生产（等保三级，院内 TLS）
+  - url: https://medplan.test.hospital.internal
+    description: 院内测试环境
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+    description: 双因素登录
+  - name: Studies
+    description: 检查与序列元数据
+  - name: WADO
+    description: DICOMweb WADO-RS 取图（经阅片网关代理）
+  - name: Segmentation
+    description: AI 辅助分割（非辅助决策类）
+  - name: Planning
+    description: 三维入路规划方案（乐观锁）
+  - name: Reports
+    description: 结构化报告与医师电子签名
+  - name: Audit
+    description: 审计查询（管理员）
+
+paths:
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: 双因素登录（口令 + UKey 数字证书）
+      description: |
+        等保三级 8.1.4.1 要求两种及以上鉴别技术组合，且其中一种至少使用密码技术。
+        本端点实现口令 + UKey SM2 数字证书。**短信验证码不可替代**（AC-02）。
+
+        实现要点：
+        1. 口令校验委托 Keycloak 26.8.1，MedPlan 不存储口令。
+        2. UKey 校验链：证书有效期 -> 颁发者链 -> 吊销列表（CRL/OCSP）-> 私钥签名验证。
+           任一失败即拒绝，且**不透露失败的具体环节**（避免证书状态侧信道）。
+        3. 返回 `ntpOffsetMs`，前端在偏移 > 1000ms 时提示医师时钟异常
+           （签名时偏移 > 阈值须拒绝签名且**不得用本地时间兜底**，AC-15）。
+        4. 成功与失败**均**写审计（`x-audit: true`）。
+      security: []
+      x-audit: true
+      x-audit-event: AUTH_LOGIN
+      x-audit-phi: false
+      x-idempotent: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+            examples:
+              ukeyDoctor:
+                summary: 影像科主任医师登录（口令 + UKey）
+                value:
+                  username: dr.zhou.liqun
+                  password: '********'
+                  ukey_cert: 'MIIBszCCAV2gAwIBAgIUJ0E6cRMhLN3vMA0GCSqGSIb3DQEBCwUAMBExDzANBgNVBAMMBnBseTEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5'
+                  ukey_pin_block: '9f3a1c7e5b2d84096a3f1c8e7d5b2a40'
+      responses:
+        '200':
+          description: 登录成功，返回会话令牌
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+              examples:
+                success:
+                  summary: 登录成功
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      accessToken: '<示例JWT，非真实凭证>'
+                      refreshToken: '<示例JWT，非真实凭证>'
+                      tokenType: Bearer
+                      expiresIn: 28800
+                      ntpOffsetMs: 42
+                      user:
+                        userId: 'u-1-0a82f1a9'
+                        loginName: dr.zhou.liqun
+                        displayName: 周立群
+                        title: 主任医师
+                        department: 医学影像科
+                        licenseNoMasked: '110***********4317'
+                        roles: [image_chief, report_signer]
+                      ukey:
+                        certSerial: '7921456789012345678901234567890'
+                        subjectName: 'CN=周立群, OU=医学影像科, O=示范市中心医院, C=CN'
+                        issuerName: 'CN=示范市医院数字证书颁发机构, O=示范市卫生健康委员会, C=CN'
+                        validFrom: '2025-03-11T00:00:00+08:00'
+                        validTo: '2028-03-10T23:59:59+08:00'
+                        signatureAlgorithm: SM2
+        '400':
+          $ref: '#/components/responses/ErrInvalidParam'
+        '401':
+          $ref: '#/components/responses/ErrUnauthenticated'
+        '423':
+          description: 账号锁定（连续失败达阈值，锁定 15 分钟）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 10002
+                message: '用户名、口令或 UKey 证书无效'
+                traceId: '01JB2Q7X3ZC4V8N0T5R9W'
+        '503':
+          description: 认证服务不可达
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 90001
+                message: '认证服务暂时不可用，请稍后重试'
+                traceId: '01JB2Q7Y8HD2M6P8V0S1X'
+
+  /api/v1/studies:
+    get:
+      tags: [Studies]
+      operationId: listStudies
+      summary: 检查列表（按数据权限过滤）
+      description: |
+        返回当前用户**有权访问**的检查列表。过滤在 SQL 层完成（`patient_grants` 关联），
+        **禁止**先查全量再在应用层过滤（会泄露患者存在性且无法分页）。
+
+        越权与不存在返回同一响应（见 info.description §4.1）。
+
+        查询走 `idx_studies_patient_date`，P95 ≤ 3s（PRD DCM-01）。
+      x-audit: true
+      x-audit-event: STUDY_LIST_VIEWED
+      x-audit-phi: true
+      x-idempotent: false
+      parameters:
+        - $ref: '#/components/parameters/PatientId'
+        - $ref: '#/components/parameters/AccessionNo'
+        - $ref: '#/components/parameters/Modality'
+        - $ref: '#/components/parameters/StudyDateFrom'
+        - $ref: '#/components/parameters/StudyDateTo'
+        - $ref: '#/components/parameters/StudyStatus'
+        - $ref: '#/components/parameters/VisitType'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Sort'
+        - $ref: '#/components/parameters/Deidentify'
+      responses:
+        '200':
+          description: 检查列表
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StudyListResponse'
+              examples:
+                firstPage:
+                  summary: 腹部增强 CT 列表（第一页）
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      items:
+                        - studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                          accessionNo: 'ACC20261022017'
+                          modality: CT
+                          bodyPart: ABDOMEN
+                          studyDescription: 腹部平扫+三期增强
+                          studyDate: '2026-10-22T10:03:36+08:00'
+                          status: completed
+                          seriesCount: 4
+                          readStatus: in_progress
+                          readAt: '2026-10-22T10:31:47+08:00'
+                          isEmergency: false
+                          queueWaitSeconds: 18720
+                          patient:
+                            patientId: 'EMPI0000384721'
+                            nameMasked: '张*明'
+                            gender: M
+                            birthDate: '1968-03-14'
+                            ageYears: 58
+                            idCardMasked: '310***********1234'
+                          visit:
+                            visitId: 'v-0a82f1a9-3c74'
+                            visitNo: 'MZ20261022017'
+                            visitType: outpatient
+                            dept: 医学影像科
+                            wardDept: null
+                            bedNo: null
+                          reportId: null
+                          hasSignedReport: false
+                          createdAt: '2026-10-22T10:05:12+08:00'
+                          updatedAt: '2026-10-22T10:31:47+08:00'
+                        - studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022114702'
+                          accessionNo: 'ACC20261022146'
+                          modality: CT
+                          bodyPart: LIVER
+                          studyDescription: 肝脏MRI 平扫+DWI
+                          studyDate: '2026-10-22T11:47:02+08:00'
+                          status: completed
+                          seriesCount: 6
+                          readStatus: read
+                          readAt: '2026-10-22T12:03:19+08:00'
+                          isEmergency: true
+                          queueWaitSeconds: 9797
+                          patient:
+                            patientId: 'EMPI0000412093'
+                            nameMasked: '李*华'
+                            gender: F
+                            birthDate: '1955-11-02'
+                            ageYears: 70
+                            idCardMasked: '310***********6782'
+                          visit:
+                            visitId: 'v-0a82f1b7-88e1'
+                            visitNo: 'ZY20261022193'
+                            visitType: inpatient
+                            dept: 消化内科
+                            wardDept: 消化内科病区
+                            bedNo: '12-3'
+                          reportId: 'r-0a82f209-5d11'
+                          hasSignedReport: true
+                          createdAt: '2026-10-22T11:52:30+08:00'
+                          updatedAt: '2026-10-22T15:08:04+08:00'
+                      total: 2
+                      page: 1
+                      limit: 20
+                      hasMore: false
+        '400':
+          $ref: '#/components/responses/ErrInvalidParam'
+        '401':
+          $ref: '#/components/responses/ErrUnauthenticated'
+        '403':
+          $ref: '#/components/responses/ErrRoleForbidden'
+        '404':
+          $ref: '#/components/responses/ErrPatientScopeHidden'
+        '503':
+          $ref: '#/components/responses/ErrInternal'
+
+  /api/v1/studies/{studyUid}/series:
+    get:
+      tags: [Studies]
+      operationId: listSeriesByStudy
+      summary: 序列列表（按期相自动分组）
+      description: |
+        返回该检查的全部序列，并按 DCM-02 规则自动归入四个期相分组：
+        `plain`（平扫）/ `arterial`（动脉期）/ `portal`（门脉期）/ `delayed`（延迟期）/ `unknown`。
+
+        每组带 `phaseConfidence`（期相识别置信度 0–1）。置信度 < 0.70 的分组前端须显示
+        「期相待人工确认」标识，**不得**默认选中（错误期相会导致 AI 分割提交被拒）。
+
+        走 `idx_series_phase` 索引。
+      x-audit: true
+      x-audit-event: STUDY_SERIES_VIEWED
+      x-audit-phi: true
+      x-idempotent: false
+      parameters:
+        - $ref: '#/components/parameters/StudyUidPath'
+        - $ref: '#/components/parameters/Deidentify'
+      responses:
+        '200':
+          description: 序列列表（已按期相分组）
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SeriesGroupedResponse'
+              examples:
+                fourPhase:
+                  summary: 腹部增强四期扫描
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                      accessionNo: 'ACC20261022017'
+                      modality: CT
+                      studyDescription: 腹部平扫+三期增强
+                      totalSeries: 4
+                      totalInstances: 1042
+                      phaseGroups:
+                        - phase: plain
+                          phaseLabel: 平扫
+                          confidence: 0.97
+                          series:
+                            - seriesUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336.728431'
+                              seriesNumber: 1
+                              description: 'Axial 5.0mm'
+                              instanceCount: 148
+                              sliceThicknessMm: 5.0
+                              rows: 512
+                              columns: 512
+                              pixelSpacingMm: [0.703, 0.703]
+                              transferSyntaxUid: '1.2.840.10008.1.2.4.90'
+                              windowCenter: 40
+                              windowWidth: 400
+                              isDefaultWindow: true
+                        - phase: arterial
+                          phaseLabel: 动脉期
+                          confidence: 0.94
+                          series:
+                            - seriesUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336.728512'
+                              seriesNumber: 2
+                              description: 'Axial 0.5mm 动脉期'
+                              instanceCount: 306
+                              sliceThicknessMm: 0.5
+                              rows: 512
+                              columns: 512
+                              pixelSpacingMm: [0.351, 0.351]
+                              transferSyntaxUid: '1.2.840.10008.1.2.4.90'
+                              windowCenter: 120
+                              windowWidth: 350
+                              isDefaultWindow: true
+                        - phase: portal
+                          phaseLabel: 门脉期
+                          confidence: 0.96
+                          series:
+                            - seriesUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336.728573'
+                              seriesNumber: 3
+                              description: 'Axial 0.5mm 门静脉期'
+                              instanceCount: 306
+                              sliceThicknessMm: 0.5
+                              rows: 512
+                              columns: 512
+                              pixelSpacingMm: [0.351, 0.351]
+                              transferSyntaxUid: '1.2.840.10008.1.2.4.90'
+                              windowCenter: 100
+                              windowWidth: 350
+                              isDefaultWindow: false
+                        - phase: delayed
+                          phaseLabel: 延迟期
+                          confidence: 0.91
+                          series:
+                            - seriesUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336.728644'
+                              seriesNumber: 4
+                              description: 'Axial 0.5mm 延迟期'
+                              instanceCount: 282
+                              sliceThicknessMm: 0.5
+                              rows: 512
+                              columns: 512
+                              pixelSpacingMm: [0.351, 0.351]
+                              transferSyntaxUid: '1.2.840.10008.1.2.4.90'
+                              windowCenter: 60
+                              windowWidth: 350
+                              isDefaultWindow: false
+        '400':
+          $ref: '#/components/responses/ErrInvalidParam'
+        '401':
+          $ref: '#/components/responses/ErrUnauthenticated'
+        '403':
+          $ref: '#/components/responses/ErrRoleForbidden'
+        '404':
+          $ref: '#/components/responses/ErrPatientScopeHidden'
+        '503':
+          $ref: '#/components/responses/ErrPacsUnreachable'
+        '502':
+          $ref: '#/components/responses/ErrPacsInstanceFetch'
+
+  /api/v1/wado/instances:
+    post:
+      tags: [WADO]
+      operationId: wadoRetrieveInstances
+      summary: WADO-RS 取图（阅片网关代理）
+      description: |
+        阅片网关代理 DICOMweb WADO-RS。**不直接暴露 dcm4chee 地址**，
+        原因有三：
+        1. PACS 不可绕过审计（每次取图必须落 `audit_logs`，AC-17）；
+        2. 可在网关层强制 L3 患者数据权限（直连 PACS 会绕过本系统授权模型）；
+        3. 可隐藏院内 PACS 拓扑（等保 8.1.4.6）。
+
+        **取图协议说明**：标准 WADO-RS 用 GET + URL 参数表达资源选择，本契约用 POST +
+        JSON body 表达批量帧选择（1.2.840.10008.5.1.4.1.1.7 中 WADO-RS 的
+        `application/dicom` 载荷在多实例场景需 multipart 打包，POST body 更便于
+        Cornerstone 影像缓存按 `sopUid` 去重）。
+
+        **性能约束（AC-05）**：2000 层 0.5mm 薄层 CT 首帧 ≤3s、全量 ≤15s。
+        实现要求：`metadataOnly: true` 时只返回 DICOM JSON 元数据（几十 KB），
+        前端先渲染序列结构再渐进填充像素；`maxInstances` 限制单次批量上限，
+        预取窗口由前端控制（首屏 ±20 层，预取半径 30 层，并发 6）。
+
+        **传输语法协商**：JPEG2000 Lossless（`1.2.840.10008.1.2.4.90`）为薄层 CT 首选，
+        需前端 `@cornerstonejs/codec-openjpeg` 1.3.0 支持；不可用时回退
+        `1.2.840.10008.1.2.1`（未压缩，流量放大约 8 倍，仅作降级）。
+
+        前端接入：`streaming-image-volume-loader` 1.86.1 通过自定义 imageId 工厂
+        调本端点，**必须**在 `dicomImageLoader.wadors.configure({ beforeSend })`
+        注入 `Authorization` 头。
+      x-audit: true
+      x-audit-event: DICOM_INSTANCES_RETRIEVED
+      x-audit-phi: true
+      x-idempotent: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WadoRetrieveRequest'
+            examples:
+              firstFrameWindow:
+                summary: 首屏取图（门脉期 ±20 层）
+                value:
+                  studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                  seriesUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336.728573'
+                  instanceNumbers: [128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165]
+                  transferSyntaxUid: '1.2.840.10008.1.2.4.90'
+                  maxInstances: 64
+                  metadataOnly: false
+              metadataOnly:
+                summary: 仅取元数据（先渲染序列结构）
+                value:
+                  studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                  seriesUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336.728573'
+                  transferSyntaxUid: '1.2.840.10008.1.2.4.90'
+                  metadataOnly: true
+      responses:
+        '200':
+          description: |
+            成功。`metadataOnly: true` 时返回 DICOM JSON 元数据数组；
+            否则返回 DICOM Part 10 二进制（单实例 `application/dicom`，
+            多实例 `multipart/related; type="application/dicom"`）。
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+            X-Instance-Count:
+              description: 本次实际返回的实例数。前端据此判断是否需要续拉（失败时用于显示已加载层数）
+              schema:
+                type: integer
+              example: 38
+          content:
+            application/dicom:
+              schema:
+                type: string
+                format: binary
+              examples:
+                dicomPart10:
+                  summary: 单实例 DICOM Part 10（Base64 示意，实际为二进制流）
+                  value: 'ZklSQVRFAAAAAAAADQ4NjIwMzQ1NjcyODkwMTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nw=='
+            multipart/related:
+              schema:
+                type: string
+                format: binary
+            application/dicom+json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DicomInstanceMetadata'
+              examples:
+                metadata:
+                  summary: DICOM JSON 元数据（metadataOnly）
+                  value:
+                    - '00100010': { vr: PN, Value: ['张*明'] }
+                      '0020000D': { vr: UI, Value: ['1.2.840.10008.5.1.4.1.1.2.20261022100336'] }
+                      '0020000E': { vr: UI, Value: ['1.2.840.10008.5.1.4.1.1.2.20261022100336.728573'] }
+                      '00080018': { vr: UI, Value: ['1.2.840.10008.5.1.4.1.1.2.20261022100336.728573.194'] }
+                      '00200013': { vr: IS, Value: [194] }
+                      '00280010': { vr: US, Value: [512] }
+                      '00280011': { vr: US, Value: [512] }
+                      '00280030': { vr: DS, Value: ['0.351', '0.351'] }
+                      '00180050': { vr: DS, Value: ['0.5'] }
+                      '00201041': { vr: DS, Value: ['133.5'] }
+                      '00281050': { vr: DS, Value: ['-1024'] }
+                      '00281051': { vr: DS, Value: ['1536'] }
+                      '00281052': { vr: DS, Value: ['40'] }
+                      '00281053': { vr: DS, Value: ['400'] }
+                      '00080060': { vr: CS, Value: ['CT'] }
+                      '00080061': { vr: LO, Value: ['0.5mm'] }
+        '400':
+          $ref: '#/components/responses/ErrInvalidParam'
+        '401':
+          $ref: '#/components/responses/ErrUnauthenticated'
+        '403':
+          $ref: '#/components/responses/ErrRoleForbidden'
+        '404':
+          $ref: '#/components/responses/ErrPatientScopeHidden'
+        '502':
+          $ref: '#/components/responses/ErrPacsInstanceFetch'
+        '503':
+          $ref: '#/components/responses/ErrPacsUnreachable'
+
+  /api/v1/segmentation-tasks:
+    post:
+      tags: [Segmentation]
+      operationId: submitSegmentationTask
+      summary: 提交 AI 辅助分割任务
+      description: |
+        提交 AI 分割任务。**非辅助决策类**功能（器审中心 2022 年第 8 号：
+        自动分割被明确列举为非辅助决策），不触及三类证。
+
+        三道服务端强校验（**不依赖前端**，防绕过）：
+
+        1. **期相前置校验**（AI-01）：肝胆/泌尿/胸外方案要求增强期相。
+           平扫或 `unknown` 期相提交 -> `code 20002`。避免浪费 GPU 与 10 分钟时限。
+        2. **task 白名单校验**（AC-09）：TotalSegmentator 2.18.0 的 46 个 task 中
+           仅 31 个为 Apache-2.0。`model` 枚举外的值 -> `code 40003` 并写审计。
+           其中 `brain_aneurysm` 为 CC BY-NC 4.0 且不提供商业许可，**明确禁止**。
+        3. **幂等校验**：`Idempotency-Key` 命中则返回既有任务，**不产生重复 GPU 计算**
+           （Redis Stream 至少一次投递语义下的硬要求）。
+
+        **GPU 降级（AC-10）**：显存 < 12GB 时后端强制 `fast = true`，
+        响应中 `degraded = true`，前端须在 AI 结果区显示「降级模式（3mm 分辨率）」，
+        且该标记随报告归档（合规要求不得静默降级）。
+
+        端到端时限 ≤10 分钟（GPU 充足前提）。超时任务置 `failed` + `error.failedAtStep = fetch`。
+      x-audit: true
+      x-audit-event: SEGMENTATION_TASK_SUBMITTED
+      x-audit-phi: true
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateSegmentationTaskRequest'
+            examples:
+              liverPortal:
+                summary: 肝脏门脉期全结构分割
+                value:
+                  studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                  seriesUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336.728573'
+                  model: total
+                  fast: false
+                  targetPhase: portal
+              degradedFast:
+                summary: 显存不足，强制降级
+                value:
+                  studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                  seriesUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336.728573'
+                  model: liver_segments
+                  fast: false
+                  targetPhase: portal
+      responses:
+        '201':
+          description: 任务已入队
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateSegmentationTaskResponse'
+              examples:
+                queued:
+                  summary: 已入队
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      taskId: 'seg-0a8301f4-77b2'
+                      studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                      seriesUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336.728573'
+                      model: total
+                      modelVersion: 2.18.0
+                      weightsVersion: 'totalseg-2.18.0-weights-2026-08'
+                      status: queued
+                      fast: false
+                      degraded: false
+                      targetPhase: portal
+                      estimatedWaitSeconds: 210
+                      idempotentReplay: false
+                      submittedBy: 'u-1-0a82f1a9'
+                      submittedAt: '2026-10-22T10:42:18+08:00'
+        '200':
+          description: 幂等键命中，返回首次创建的任务（不重复占用 GPU）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateSegmentationTaskResponse'
+              examples:
+                replay:
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      taskId: 'seg-0a8301f4-77b2'
+                      studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                      seriesUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336.728573'
+                      model: total
+                      modelVersion: 2.18.0
+                      weightsVersion: 'totalseg-2.18.0-weights-2026-08'
+                      status: queued
+                      fast: false
+                      degraded: false
+                      targetPhase: portal
+                      estimatedWaitSeconds: 210
+                      idempotentReplay: true
+                      submittedBy: 'u-1-0a82f1a9'
+                      submittedAt: '2026-10-22T10:42:18+08:00'
+        '400':
+          description: |
+            参数错误，或模型许可不在白名单（`40003`）。
+            白名单外示例见 forbiddenModelExample。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                forbiddenModel:
+                  summary: 模型许可不在白名单（AC-09）
+                  value:
+                    code: 40003
+                    message: '所选模型不在许可白名单内，无法提交'
+                    traceId: '01JB2QA1M8KD3F7P2R5T9'
+                    data:
+                      # 回显被拒模型与许可信息，供 UIUX-P2 §4.3 拒绝态展示：
+                      # 「请求模型 + 许可协议 + 错误码 + 可用模型下拉」
+                      requestedModel: 'brain_aneurysm'
+                      requestedLicense: 'CC BY-NC 4.0'
+                      rejectionReason: '该task 为非商业许可，不提供商业使用授权'
+                      allowedModels: [total, total_mr, liver_segments, lung_vessels]
+                      # 供 UI 显示「本次拒绝已记入审计」
+                      auditRecorded: true
+                      auditEventType: 'segmentation_task_rejected'
+                invalidParam:
+                  summary: 期相字段缺失
+                  value:
+                    code: 10001
+                    message: 'targetPhase 必须为 arterial / portal / delayed 之一'
+                    traceId: '01JB2QA1N9LE4G8Q3S6U0'
+        '401':
+          $ref: '#/components/responses/ErrUnauthenticated'
+        '403':
+          $ref: '#/components/responses/ErrRoleForbidden'
+        '404':
+          $ref: '#/components/responses/ErrPatientScopeHidden'
+        '422':
+          description: 期相前置条件不满足（AI-01）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 20002
+                message: '该序列为平扫，不满足肝胆增强分割的期相要求，请选择动脉期或门脉期序列'
+                traceId: '01JB2QA2P0MF5H9R4T7V1'
+        '429':
+          description: AI 队列已满（40001）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 40001
+                message: 'AI 任务队列已满，当前排队 6 个任务，请稍后重试'
+                traceId: '01JB2QA2Q1NG6I0S5U8W2'
+
+  /api/v1/segmentation-tasks/{taskId}:
+    get:
+      tags: [Segmentation]
+      operationId: getSegmentationTask
+      summary: 查询分割任务状态与结果
+      description: |
+        轮询端点。前端建议轮询间隔 3s 起、退避至 10s，任务进入终态后停止。
+
+        **AI 输出合规约束（强）**：`structures[]` 中**只有**解剖结构名与量化体积，
+        **没有任何自由文本字段**，`additionalProperties: false`。
+        因此 AI 在类型层面不可能产出诊断结论（器审中心 2022 年第 8 号边界）。
+
+        `failed` 时必须返回 `error.failedAtStep`（失败环节）与 `error.code`，
+        **禁止**以空模型或零体积列表冒充成功（AI-02 硬要求）。
+
+        `volumeMl` 为 AI 量化测量值，**必须**经执业医师逐项确认后才可进入报告
+        （AC-11，未确认时报告提交被阻断）。
+      x-audit: true
+      x-audit-event: SEGMENTATION_TASK_READ
+      x-audit-phi: true
+      x-idempotent: false
+      parameters:
+        - $ref: '#/components/parameters/TaskIdPath'
+        - $ref: '#/components/parameters/IncludeStructures'
+      responses:
+        '200':
+          description: 任务状态
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SegmentationTaskResponse'
+              examples:
+                succeeded:
+                  summary: 推理成功（含结构化量化结果，无任何自由文本）
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      taskId: 'seg-0a8301f4-77b2'
+                      studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                      seriesUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336.728573'
+                      model: total
+                      modelVersion: 2.18.0
+                      weightsVersion: 'totalseg-2.18.0-weights-2026-08'
+                      status: succeeded
+                      fast: false
+                      degraded: false
+                      progressPercent: 100
+                      phaseValidation:
+                        seriesPhase: portal
+                        eligible: true
+                        reasonCode: null
+                      structures:
+                        - structureName: liver
+                          structureLabelZh: 肝脏
+                          volumeMl: 1428.6
+                          sopInstanceUid: '1.2.840.10008.5.1.4.1.1.66.592401236001'
+                          confirmed: false
+                        - structureName: liver_right_lobe
+                          structureLabelZh: 肝右叶
+                          volumeMl: 986.3
+                          sopInstanceUid: '1.2.840.10008.5.1.4.1.1.66.592401236002'
+                          confirmed: false
+                        - structureName: liver_left_lobe
+                          structureLabelZh: 肝左叶
+                          volumeMl: 442.3
+                          sopInstanceUid: '1.2.840.10008.5.1.4.1.1.66.592401236003'
+                          confirmed: false
+                        - structureName: portal_vein
+                          structureLabelZh: 门静脉
+                          volumeMl: 38.7
+                          sopInstanceUid: '1.2.840.10008.5.1.4.1.1.66.592401236004'
+                          confirmed: false
+                        - structureName: inferior_vena_cava
+                          structureLabelZh: 下腔静脉
+                          volumeMl: 71.2
+                          sopInstanceUid: '1.2.840.10008.5.1.4.1.1.66.592401236005'
+                          confirmed: false
+                        - structureName: gallbladder
+                          structureLabelZh: 胆囊
+                          volumeMl: 26.4
+                          sopInstanceUid: '1.2.840.10008.5.1.4.1.1.66.592401236006'
+                          confirmed: false
+                        - structureName: right_kidney
+                          structureLabelZh: 右肾
+                          volumeMl: 148.1
+                          sopInstanceUid: '1.2.840.10008.5.1.4.1.1.66.592401236007'
+                          confirmed: false
+                        - structureName: pancreas
+                          structureLabelZh: 胰腺
+                          volumeMl: 84.9
+                          sopInstanceUid: '1.2.840.10008.5.1.4.1.1.66.592401236008'
+                          confirmed: false
+                      confirmProgress:
+                        total: 8
+                        confirmed: 0
+                        allConfirmed: false
+                      error: null
+                      disclaimer: '本结果为 AI 辅助标记，不构成诊断结论，须经执业医师确认'
+                      submittedBy: 'u-1-0a82f1a9'
+                      submittedAt: '2026-10-22T10:42:18+08:00'
+                      startedAt: '2026-10-22T10:42:51+08:00'
+                      finishedAt: '2026-10-22T10:46:23+08:00'
+                degraded:
+                  summary: 降级模式（显存不足，AC-10）
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      taskId: 'seg-0a8302b7-91ce'
+                      studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                      seriesUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336.728573'
+                      model: total
+                      modelVersion: 2.18.0
+                      weightsVersion: 'totalseg-2.18.0-weights-2026-08'
+                      status: succeeded
+                      fast: true
+                      degraded: true
+                      progressPercent: 100
+                      phaseValidation:
+                        seriesPhase: portal
+                        eligible: true
+                        reasonCode: null
+                      structures:
+                        - structureName: liver
+                          structureLabelZh: 肝脏
+                          volumeMl: 1451.2
+                          sopInstanceUid: '1.2.840.10008.5.1.4.1.1.66.592402118003'
+                          confirmed: false
+                        - structureName: liver_right_lobe
+                          structureLabelZh: 肝右叶
+                          volumeMl: 1002.4
+                          sopInstanceUid: '1.2.840.10008.5.1.4.1.1.66.592402118004'
+                          confirmed: false
+                      confirmProgress:
+                        total: 2
+                        confirmed: 0
+                        allConfirmed: false
+                      error: null
+                      disclaimer: '本结果为 AI 辅助标记，不构成诊断结论，须经执业医师确认'
+                      submittedBy: 'u-1-0a82f1a9'
+                      submittedAt: '2026-10-22T10:51:02+08:00'
+                      startedAt: '2026-10-22T10:51:09+08:00'
+                      finishedAt: '2026-10-22T10:53:41+08:00'
+                failed:
+                  summary: 推理失败（必须返回失败环节，禁止空模型冒充成功）
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      taskId: 'seg-0a8303d1-4a08'
+                      studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                      seriesUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336.728573'
+                      model: total
+                      modelVersion: 2.18.0
+                      weightsVersion: 'totalseg-2.18.0-weights-2026-08'
+                      status: failed
+                      fast: false
+                      degraded: false
+                      progressPercent: 45
+                      phaseValidation:
+                        seriesPhase: portal
+                        eligible: true
+                        reasonCode: null
+                      structures: []
+                      confirmProgress:
+                        total: 0
+                        confirmed: 0
+                        allConfirmed: false
+                      error:
+                        code: 40002
+                        failedAtStep: inference
+                        message: 'GPU 显存不足导致推理中断，已完成 45%'
+                      disclaimer: '本结果为 AI 辅助标记，不构成诊断结论，须经执业医师确认'
+                      submittedBy: 'u-1-0a82f1a9'
+                      submittedAt: '2026-10-22T11:02:40+08:00'
+                      startedAt: '2026-10-22T11:02:44+08:00'
+                      finishedAt: '2026-10-22T11:04:16+08:00'
+                plainPhaseRejected:
+                  summary: 平扫不满足增强分割（前端可据此提前禁用提交按钮）
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      taskId: 'seg-0a8304e6-77b3'
+                      studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                      seriesUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336.728431'
+                      model: liver_segments
+                      modelVersion: 2.18.0
+                      weightsVersion: 'totalseg-2.18.0-weights-2026-08'
+                      status: failed
+                      fast: false
+                      degraded: false
+                      progressPercent: 0
+                      phaseValidation:
+                        seriesPhase: plain
+                        eligible: false
+                        reasonCode: PHASE_NOT_ENHANCED
+                      structures: []
+                      confirmProgress:
+                        total: 0
+                        confirmed: 0
+                        allConfirmed: false
+                      error:
+                        code: 20002
+                        failedAtStep: precheck
+                        message: '该序列为平扫，不满足肝胆增强分割的期相要求'
+                      disclaimer: '本结果为 AI 辅助标记，不构成诊断结论，须经执业医师确认'
+                      submittedBy: 'u-1-0a82f1a9'
+                      submittedAt: '2026-10-22T11:08:12+08:00'
+                      startedAt: null
+                      finishedAt: '2026-10-22T11:08:12+08:00'
+        '400':
+          $ref: '#/components/responses/ErrInvalidParam'
+        '401':
+          $ref: '#/components/responses/ErrUnauthenticated'
+        '403':
+          $ref: '#/components/responses/ErrRoleForbidden'
+        '404':
+          $ref: '#/components/responses/ErrResourceNotFound'
+        '503':
+          $ref: '#/components/responses/ErrInternal'
+
+  /api/v1/segmentation-tasks/{taskId}/confirm:
+    post:
+      tags: [Segmentation]
+      operationId: confirmSegmentationItems
+      summary: 医师逐项确认 AI 辅助标记
+      description: |
+        医师对每个 AI 结构逐项「确认」或「修改」（AC-11 / AI-03）。
+
+        规则：
+        1. `action = modified` 时 `modificationNote` **必填**，无备注的修改一律拒绝
+           （`code 10001`）。修改留痕是电子病历「修改痕迹」要求的一部分。
+        2. 幂等：同一 `Idempotency-Key` 重复提交不产生重复确认记录。
+        3. 本端点**不**检查覆盖率（允许分批确认），但报告提交端点会检查
+           `allConfirmed = true`（AC-11：未全部确认则报告不可提交）。
+        4. `role` 不含 `report_signer` 的用户（如实习/试用期医师）可确认，
+           但其确认记录带 `pendingSupervisorReview = true`，报告不可提交。
+
+        幂等之外仍用乐观语义：同一 `structureName` 重复确认以最后一次为准，
+        每次变更追加 `segmentation_confirms` 记录（append-only，不 UPDATE）。
+      x-audit: true
+      x-audit-event: SEGMENTATION_ITEM_CONFIRMED
+      x-audit-phi: true
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/TaskIdPath'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConfirmSegmentationRequest'
+            examples:
+              mixedActions:
+                summary: 部分确认、部分修改
+                value:
+                  items:
+                    - structureName: liver
+                      action: confirmed
+                    - structureName: liver_right_lobe
+                      action: confirmed
+                    - structureName: gallbladder
+                      action: modified
+                      modificationNote: '胆囊壁增厚较明显，AI 轮廓未包含胆囊窝脂肪，请人工外扩 2mm 后确认'
+                    - structureName: pancreas
+                      action: confirmed
+      responses:
+        '200':
+          description: 确认已记录
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ConfirmSegmentationResponse'
+              examples:
+                partial:
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      taskId: 'seg-0a8301f4-77b2'
+                      accepted: 4
+                      rejected: 0
+                      confirmProgress:
+                        total: 8
+                        confirmed: 4
+                        allConfirmed: false
+                      pendingSupervisorReview: false
+                      idempotentReplay: false
+                      confirmedAt: '2026-10-22T10:58:36+08:00'
+        '400':
+          $ref: '#/components/responses/ErrInvalidParam'
+        '401':
+          $ref: '#/components/responses/ErrUnauthenticated'
+        '403':
+          $ref: '#/components/responses/ErrRoleForbidden'
+        '404':
+          $ref: '#/components/responses/ErrResourceNotFound'
+        '409':
+          description: 任务未成功结束，不可确认（`code 10001`）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 10001
+                message: '任务尚未成功完成，暂不可确认'
+                traceId: '01JB2QA5R2SG7J1T6V9Y3'
+        '422':
+          description: |
+            修改项缺少 `modificationNote`（`code 10001`）。
+
+            **另一条同码路径**：会话身份与目标资源不匹配。
+            例：用户提交的 `structureName` 不属于该任务在 PACS 中的实际分割结果，
+            或该任务所属检查不在此用户的数据授权范围内。
+            此时返回 `code 10003`（角色/归属级），**不是** 10004 ——
+            因为 10004 保留给患者级越权（须与「患者不存在」不可区分），
+            混用会污染那条安全语义。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missingNote:
+                  summary: 修改项缺少修改说明
+                  value:
+                    code: 10001
+                    message: '第 3 项action 为 modified，必须填写 modificationNote'
+                    traceId: '01JB2QA5S3TH8K2U7W0Z'
+                identityMismatch:
+                  summary: 会话身份与资源归属不匹配
+                  value:
+                    code: 10003
+                    message: '所确认的分割项不属于当前任务，或无权确认该检查的 AI 标记'
+                    traceId: '01JB2QA5T4UJ9L3V8X1Y2'
+
+  /api/v1/plans:
+    post:
+      tags: [Planning]
+      operationId: createPlan
+      summary: 保存规划方案
+      description: |
+        新建三维入路规划方案。v1.0 仅提供**乐观锁 + 操作日志**，
+        不做多人实时协作标注（医学标注语义冲突无法由算法裁决，N1）。
+
+        `payload` 为未定型结构（ADR-004：`jsonb` + GIN 索引，避免过早固定 Schema），
+        但**必须**包含 `entry`（入路点）与 `target`（靶点）两组坐标，
+        否则三维视图无法渲染。坐标单位为患者 DICOM 坐标系（mm）。
+
+        幂等：双击保存不产生两份方案（AC 依 Idempotency-Key）。
+
+        所有写操作经 `PlanCommandService`，产生可读操作日志（`plan_commands`），
+        这是审计友好的关键（CRDT 内部状态不可读，ADR-006）。
+      x-audit: true
+      x-audit-event: PLAN_CREATED
+      x-audit-phi: true
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePlanRequest'
+            examples:
+              liverResection:
+                summary: 肝右叶后段病灶楔形切除入路规划
+                value:
+                  studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                  segmentationTaskId: 'seg-0a8301f4-77b2'
+                  planType: hepatic_wedge_resection
+                  title: '肝右叶后段病灶楔形切除入路规划'
+                  payload:
+                    entry:
+                      patientXYZmm: [-62.4, 118.7, -34.2]
+                      orientation: posterolateral_right
+                    target:
+                      patientXYZmm: [-28.1, 86.3, -12.5]
+                      structureName: liver_right_lobe
+                    approachAngleDeg: 32.5
+                    corridorWidthMm: 18.0
+                    avoidanceStructures: [portal_vein, inferior_vena_cava, gallbladder]
+                    notes: '避开门静脉右后支，术中需超声辅助确认入路深度'
+      responses:
+        '201':
+          description: 方案已创建
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanResponse'
+              examples:
+                created:
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      planId: 'plan-0a8305f2-3e91'
+                      studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                      segmentationTaskId: 'seg-0a8301f4-77b2'
+                      version: 1
+                      status: draft
+                      planType: hepatic_wedge_resection
+                      title: 肝右叶后段病灶楔形切除入路规划
+                      payload:
+                        entry:
+                          patientXYZmm: [-62.4, 118.7, -34.2]
+                          orientation: posterolateral_right
+                        target:
+                          patientXYZmm: [-28.1, 86.3, -12.5]
+                          structureName: liver_right_lobe
+                        approachAngleDeg: 32.5
+                        corridorWidthMm: 18.0
+                        avoidanceStructures: [portal_vein, inferior_vena_cava, gallbladder]
+                        notes: '避开门静脉右后支，术中需超声辅助确认入路深度'
+                      createdBy: 'u-2-0a82c401'
+                      createdByNameMasked: '陈*'
+                      createdAt: '2026-10-22T11:14:52+08:00'
+                      updatedBy: 'u-2-0a82c401'
+                      updatedByNameMasked: '陈*'
+                      updatedAt: '2026-10-22T11:14:52+08:00'
+                      idempotentReplay: false
+        '200':
+          description: 幂等键命中，返回已创建的方案
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanResponse'
+        '400':
+          $ref: '#/components/responses/ErrInvalidParam'
+        '401':
+          $ref: '#/components/responses/ErrUnauthenticated'
+        '403':
+          $ref: '#/components/responses/ErrRoleForbidden'
+        '404':
+          $ref: '#/components/responses/ErrPatientScopeHidden'
+        '503':
+          $ref: '#/components/responses/ErrInternal'
+
+  /api/v1/plans/{planId}:
+    put:
+      tags: [Planning]
+      operationId: updatePlan
+      summary: 更新规划方案（乐观锁，冲突返回 409）
+      description: |
+        **必须**携带 `version`（客户端最后读到的版本号）。这是 v1.0 唯一的一致性手段
+        ——不用 CRDT/OT，理由见 ADR-006：CRDT 静默合并会产生临床错误且不可审计。
+
+        冲突（`version` 与服务端当前值不一致）-> **HTTP 409** + `code 20003`，
+        响应 `data.currentVersion` 与 `data.conflictingEditor` 供前端提示人工裁决
+        （架构方案 12.2 E7）。
+
+        服务端成功更新后 `version` 自增 1，并追加一条 `plan_commands` 操作日志
+        （记录 before/after 值与操作人）。
+
+        `status` 流转：`draft -> confirmed -> archived`。`archived` 后修改 -> `code 50004`
+        （需医务部门审批凭证）。
+      x-audit: true
+      x-audit-event: PLAN_UPDATED
+      x-audit-phi: true
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/PlanIdPath'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePlanRequest'
+            examples:
+              adjustAngle:
+                summary: 调整入路角度
+                value:
+                  version: 3
+                  title: 肝右叶后段病灶楔形切除入路规划（修订）
+                  payload:
+                    entry:
+                      patientXYZmm: [-65.8, 121.0, -36.8]
+                      orientation: posterolateral_right
+                    target:
+                      patientXYZmm: [-28.1, 86.3, -12.5]
+                      structureName: liver_right_lobe
+                    approachAngleDeg: 27.0
+                    corridorWidthMm: 22.5
+                    avoidanceStructures: [portal_vein, inferior_vena_cava]
+                    notes: '第二版：后移入针点 4mm 以增大与门静脉右后支间距'
+      responses:
+        '200':
+          description: 更新成功，version 自增
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlanResponse'
+              examples:
+                updated:
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      planId: 'plan-0a8305f2-3e91'
+                      studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                      segmentationTaskId: 'seg-0a8301f4-77b2'
+                      version: 4
+                      status: draft
+                      planType: hepatic_wedge_resection
+                      title: 肝右叶后段病灶楔形切除入路规划（修订）
+                      payload:
+                        entry:
+                          patientXYZmm: [-65.8, 121.0, -36.8]
+                          orientation: posterolateral_right
+                        target:
+                          patientXYZmm: [-28.1, 86.3, -12.5]
+                          structureName: liver_right_lobe
+                        approachAngleDeg: 27.0
+                        corridorWidthMm: 22.5
+                        avoidanceStructures: [portal_vein, inferior_vena_cava]
+                        notes: '第二版：后移入针点 4mm 以增大与门静脉右后支间距'
+                      createdBy: 'u-2-0a82c401'
+                      createdByNameMasked: '陈*'
+                      createdAt: '2026-10-22T11:14:52+08:00'
+                      updatedBy: 'u-2-0a82c401'
+                      updatedByNameMasked: '陈*'
+                      updatedAt: '2026-10-22T11:22:07+08:00'
+                      idempotentReplay: false
+        '400':
+          $ref: '#/components/responses/ErrInvalidParam'
+        '401':
+          $ref: '#/components/responses/ErrUnauthenticated'
+        '403':
+          $ref: '#/components/responses/ErrRoleForbidden'
+        '404':
+          $ref: '#/components/responses/ErrResourceNotFound'
+        '409':
+          description: |
+            **乐观锁版本冲突**（HTTP 409，`code 20003`）。
+            响应携带服务端当前版本与最后编辑者，供前端提示人工裁决。
+
+            同一状态码下另有两种业务冲突：`50003` 报告已签名（正文与规划方案一并锁定）、
+            `50004` 方案已归档（修改需医务部门审批凭证）。前端按 `code` 分支，不看 HTTP 码。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                versionConflict:
+                  summary: 版本冲突（乐观锁）
+                  value:
+                    code: 20003
+                    message: '规划方案已被他人更新，请刷新后在最新版本上修改'
+                    traceId: '01JB2QA8T4XJ9L3V8W1Y4'
+                    data:
+                      currentVersion: 5
+                      conflictingEditorMasked: '王*'
+                      conflictingEditorId: 'u-3-0a82d117'
+                      updatedAt: '2026-10-22T11:25:41+08:00'
+                signLocked:
+                  summary: 报告已签名，方案随之锁定
+                  value:
+                    code: 50003
+                    message: '报告已签署，规划方案随正文一并锁定，不可修改'
+                    traceId: '01JB2QA8U5YK0M4W9X2Z5'
+                archivedLocked:
+                  summary: 方案已归档，修改需审批
+                  value:
+                    code: 50004
+                    message: '规划方案已归档，修改需提供医务部门审批凭证'
+                    traceId: '01JB2QA8V6ZL1N5X0Y3A6'
+
+  /api/v1/reports/{reportId}:
+    get:
+      tags: [Reports]
+      operationId: getReport
+      summary: 获取结构化报告
+      description: |
+        返回卫健委电子病历必备字段（架构方案 §7.3 全覆盖）：
+
+        | 规范字段 | 响应位置 |
+        |---------|---------|
+        | 患者基本信息 | `patient` |
+        | 就诊信息 | `visit` |
+        | 检查信息 | `study` |
+        | 检查所见 | `structuredFields.findings[]`（分段结构化） |
+        | 诊断意见 | `structuredFields.impression` |
+        | 建议随访 | `structuredFields.followUpRecommendation` |
+        | 报告医师 | `structuredFields.findings[].authoredBy` / `structuredFields.impression.authoredBy` |
+        | 审核医师 | `reviewer` |
+        | 报告时间 | `reportTime` |
+        | 修改痕迹 | `revisionHistory[]` + 审计日志 |
+        | 签名有效性 | `signature` |
+        | AI 参与声明 | `structuredFields.aiAssist.disclosure` |
+
+        **五类受控字段**（RPT-01）：检查部位 `examBodyPart`、扫描方式 `scanMode`、
+        影像所见 `findings`、影像诊断意见 `impression`、建议随访 `followUpRecommendation`。
+        任一为空 -> **阻断签名**（AC-12）。
+
+        **AI 字段只出现在 `structuredFields.aiAssist` 内**（COM-08）。
+        该分组只含结构化引用（结构名 + 体积 + 确认医师 + 确认时间），
+        **不含任何结论性文本**。`impression.authoredBy` 恒为执业医师。
+
+        `status != signed` 时，`structuredFields.impression` 对**非报告相关角色**
+        返回掩码（防止未签署报告的诊断意见外泄，架构方案 §9.2 末条）。
+      x-audit: true
+      x-audit-event: REPORT_VIEWED
+      x-audit-phi: true
+      x-idempotent: false
+      parameters:
+        - $ref: '#/components/parameters/ReportIdPath'
+        - $ref: '#/components/parameters/Deidentify'
+      responses:
+        '200':
+          description: 报告详情
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReportResponse'
+              examples:
+                draftWithAi:
+                  summary: 草稿（含 AI 辅助标记，未全部确认，诊断意见已有执业医师署名）
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      reportId: 'r-0a8311a4-6c05'
+                      studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                      version: 1
+                      status: draft
+                      lockState:
+                        state: DRAFT
+                        editable: true
+                        reason: NOT_SIGNED_YET
+                        signatureValid: false
+                        lockedAt: null
+                        lockedScope: []
+                      templateCode: abdomen_liver_ct_v3
+                      patient:
+                        patientId: 'EMPI0000384721'
+                        nameMasked: '张*明'
+                        gender: M
+                        birthDate: '1968-03-14'
+                        ageYears: 58
+                        idCardMasked: '310***********1234'
+                      visit:
+                        visitId: 'v-0a82f1a9-3c74'
+                        visitNo: 'MZ20261022017'
+                        visitType: outpatient
+                        dept: 医学影像科
+                        wardDept: null
+                        bedNo: null
+                        admitDate: '2026-10-22T09:48:00+08:00'
+                      study:
+                        accessionNo: 'ACC20261022017'
+                        modality: CT
+                        bodyPart: ABDOMEN
+                        studyDescription: 腹部平扫+三期增强
+                        studyDate: '2026-10-22T10:03:36+08:00'
+                      structuredFields:
+                        examBodyPart: 上腹部
+                        scanMode: 腹部平扫+三期增强CT
+                        findings:
+                          - key: plain
+                            label: 平扫
+                            windowType: abdominal_soft
+                            text: '肝右叶后段见约 2.3×1.8cm 类圆形低密度影，边界较清，CT 值约 34HU；肝实质未见弥漫性密度减低。'
+                            authoredBy:
+                              userId: 'u-1-0a82f1a9'
+                              nameMasked: '周*'
+                              title: 主任医师
+                              department: 医学影像科
+                          - key: arterial
+                            label: 动脉期
+                            windowType: abdominal_soft
+                            text: '肝右叶后段病灶动脉期未见明显强化，较同期正常肝实质呈相对低密度。'
+                            authoredBy:
+                              userId: 'u-1-0a82f1a9'
+                              nameMasked: '周*'
+                              title: 主任医师
+                              department: 医学影像科
+                          - key: portal
+                            label: 门静脉期
+                            windowType: abdominal_soft
+                            text: '肝右叶后段约 2.3×1.8cm 类圆形低密度影，边界较清，增强后动脉期不强化，延迟期轻度强化；门静脉主干及左右分支通畅，肝内血管走行未见异常。'
+                            authoredBy:
+                              userId: 'u-1-0a82f1a9'
+                              nameMasked: '周*'
+                              title: 主任医师
+                              department: 医学影像科
+                          - key: delayed
+                            label: 延迟期
+                            windowType: abdominal_soft
+                            text: '病灶延迟期呈轻度渐进性强化，较门静脉期进一步升高但低于周围肝实质。'
+                            authoredBy:
+                              userId: 'u-1-0a82f1a9'
+                              nameMasked: '周*'
+                              title: 主任医师
+                              department: 医学影像科
+                        impression:
+                          text: '肝右叶占位性病变，性质待定（建议穿刺活检）。'
+                          authoredBy:
+                            userId: 'u-1-0a82f1a9'
+                            nameMasked: '周*'
+                            title: 主任医师
+                            department: 医学影像科
+                            authoredAt: '2026-10-22T11:41:05+08:00'
+                        followUpRecommendation:
+                          text: '建议 3 个月后复查肝脏增强 MRI 或 CT 平扫+三期增强，对比病灶大小与强化特征变化；穿刺活检结果回报后再行评估。'
+                          authoredBy:
+                            userId: 'u-1-0a82f1a9'
+                            nameMasked: '周*'
+                            title: 主任医师
+                            department: 医学影像科
+                        aiAssist:
+                          disclosure: '本结果为 AI 辅助标记，不构成诊断结论，须经执业医师确认'
+                          modelName: total
+                          modelVersion: 2.18.0
+                          degraded: false
+                          segmentationTaskId: 'seg-0a8301f4-77b2'
+                          allItemsConfirmed: false
+                          referencedStructures:
+                            - structureName: liver
+                              structureLabelZh: 肝脏
+                              volumeMl: 1428.6
+                              confirmAction: confirmed
+                              confirmedByMasked: '周*'
+                              confirmedAt: '2026-10-22T10:58:36+08:00'
+                            - structureName: gallbladder
+                              structureLabelZh: 胆囊
+                              volumeMl: 26.4
+                              confirmAction: modified
+                              confirmedByMasked: '周*'
+                              confirmedAt: '2026-10-22T10:58:36+08:00'
+                      author:
+                        userId: 'u-1-0a82f1a9'
+                        nameMasked: '周*'
+                        title: 主任医师
+                        department: 医学影像科
+                      reviewer: null
+                      reportTime: '2026-10-22T11:41:05+08:00'
+                      bodyDigestAlgorithm: SM3
+                      bodyDigest: '7f3a9c1e5b2d84096a3f1c8e7d5b2a40c9e3f7a1b6d2048e9c5f3a7b1d6e2c94'
+                      signature: null
+                      revisionHistory:
+                        - version: 1
+                          editedByMasked: '周*'
+                          editedAt: '2026-10-22T11:41:05+08:00'
+                          changeSummary: 创建报告草稿，录入平扫与三期增强所见
+                      createdAt: '2026-10-22T11:38:20+08:00'
+                      updatedAt: '2026-10-22T11:41:05+08:00'
+                signedLocked:
+                  summary: 已签署（正文锁定，含签名与 TSA 时间戳）
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      reportId: 'r-0a8312b7-9d33'
+                      studyUid: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                      version: 4
+                      status: signed
+                      lockState:
+                        state: SIGNED
+                        editable: false
+                        reason: SIGNED_LOCKED
+                        signatureValid: true
+                        lockedAt: '2026-10-22T11:56:30+08:00'
+                        lockedScope: [report_body, plan_payload]
+                      templateCode: abdomen_liver_ct_v3
+                      patient:
+                        patientId: 'EMPI0000384721'
+                        nameMasked: '张*明'
+                        gender: M
+                        birthDate: '1968-03-14'
+                        ageYears: 58
+                        idCardMasked: '310***********1234'
+                      visit:
+                        visitId: 'v-0a82f1a9-3c74'
+                        visitNo: 'MZ20261022017'
+                        visitType: outpatient
+                        dept: 医学影像科
+                        wardDept: null
+                        bedNo: null
+                        admitDate: '2026-10-22T09:48:00+08:00'
+                      study:
+                        accessionNo: 'ACC20261022017'
+                        modality: CT
+                        bodyPart: ABDOMEN
+                        studyDescription: 腹部平扫+三期增强
+                        studyDate: '2026-10-22T10:03:36+08:00'
+                      structuredFields:
+                        examBodyPart: 上腹部
+                        scanMode: 腹部平扫+三期增强CT
+                        findings:
+                          - key: portal
+                            label: 门静脉期
+                            windowType: abdominal_soft
+                            text: '肝右叶后段约 2.3×1.8cm 类圆形低密度影，边界较清，增强后动脉期不强化，延迟期轻度强化；门静脉主干及左右分支通畅，肝内血管走行未见异常。'
+                            authoredBy:
+                              userId: 'u-1-0a82f1a9'
+                              nameMasked: '周*'
+                              title: 主任医师
+                              department: 医学影像科
+                        impression:
+                          text: '肝右叶占位性病变，性质待定（建议穿刺活检）。'
+                          authoredBy:
+                            userId: 'u-1-0a82f1a9'
+                            nameMasked: '周*'
+                            title: 主任医师
+                            department: 医学影像科
+                            authoredAt: '2026-10-22T11:41:05+08:00'
+                        followUpRecommendation:
+                          text: '建议 3 个月后复查肝脏增强 MRI 或 CT 平扫+三期增强，对比病灶大小与强化特征变化；穿刺活检结果回报后再行评估。'
+                          authoredBy:
+                            userId: 'u-1-0a82f1a9'
+                            nameMasked: '周*'
+                            title: 主任医师
+                            department: 医学影像科
+                        aiAssist:
+                          disclosure: '本结果为 AI 辅助标记，不构成诊断结论，须经执业医师确认'
+                          modelName: total
+                          modelVersion: 2.18.0
+                          degraded: false
+                          segmentationTaskId: 'seg-0a8301f4-77b2'
+                          allItemsConfirmed: true
+                          referencedStructures:
+                            - structureName: liver
+                              structureLabelZh: 肝脏
+                              volumeMl: 1428.6
+                              confirmAction: confirmed
+                              confirmedByMasked: '周*'
+                              confirmedAt: '2026-10-22T10:58:36+08:00'
+                            - structureName: gallbladder
+                              structureLabelZh: 胆囊
+                              volumeMl: 26.4
+                              confirmAction: modified
+                              confirmedByMasked: '周*'
+                              confirmedAt: '2026-10-22T10:58:36+08:00'
+                      author:
+                        userId: 'u-1-0a82f1a9'
+                        nameMasked: '周*'
+                        title: 主任医师
+                        department: 医学影像科
+                      reviewer:
+                        userId: 'u-1-0a82f1a9'
+                        nameMasked: '周*'
+                        title: 主任医师
+                        department: 医学影像科
+                        reviewedAt: '2026-10-22T11:48:20+08:00'
+                      reportTime: '2026-10-22T11:41:05+08:00'
+                      bodyDigestAlgorithm: SM3
+                      bodyDigest: '3a7d5b1e9c2f48096a3f1c8e7d5b2a40c9e3f7a1b6d2048e9c5f3a7b1d6e2c94'
+                      signature:
+                        signatureId: 'sig-0a8313c8-4e52'
+                        serialNo: 'SN-2026-10-22-000117'
+                        documentUniqueSn: '1.2.840.10008.5.1.4.1.1.88.20261022115630.4471'
+                        subjectId: 'u-1-0a82f1a9'
+                        subjectNameMasked: '周*'
+                        digestAlgorithm: SM3
+                        digestValue: '3a7d5b1e9c2f48096a3f1c8e7d5b2a40c9e3f7a1b6d2048e9c5f3a7b1d6e2c94'
+                        signatureAlgorithm: SM2
+                        signatureValue: 'MEUCIQDR3vJ7NmQ0Kx8pL2sT5wYb9cF1hA4dE6gH8jK0mN2oP4qR6sT8uV0wX2yZ4aB6cD8eF0gH2iJ4kL6mN8oP0qR2sT4uV6wX8yZ0aB2cD4eF6gH8iJ0kL2mN4oP6qR8sT0uV2wX4yZ6aB8cD0eF2gH4iJ6kL8mN0oP2qR4sT6uV8wX0yZ2aB4cD6eF8gH0iJ2kL4mN6oP8q=='
+                        certSerial: '7921456789012345678901234567890'
+                        certIssuerName: 'CN=示范市医院数字证书颁发机构, O=示范市卫生健康委员会, C=CN'
+                        signedAt: '2026-10-22T11:56:30+08:00'
+                        tsaAuthority: 'CN=示范市权威时间戳服务, O=示范市计量院, C=CN'
+                        tsaToken: '<示例TSA时间戳令牌，非真实凭证>'
+                        logSerialNo: 'SIGLOG-20261022-000117'
+                        logIntegrityDigest: 'b8e2f4a6c0d2e8f1a3b5c7d9e1f3a5b7c9d1e3f5a7b9c1d3e5f7a9b1c3d5e7f9a1'
+                        verifiedAt: '2026-10-22T11:56:31+08:00'
+                      revisionHistory:
+                        - version: 1
+                          editedByMasked: '周*'
+                          editedAt: '2026-10-22T11:41:05+08:00'
+                          changeSummary: 创建报告草稿
+                        - version: 2
+                          editedByMasked: '周*'
+                          editedAt: '2026-10-22T11:45:18+08:00'
+                          changeSummary: 补录延迟期所见
+                        - version: 3
+                          editedByMasked: '周*'
+                          editedAt: '2026-10-22T11:48:20+08:00'
+                          changeSummary: 上级医师审核通过
+                        - version: 4
+                          editedByMasked: '周*'
+                          editedAt: '2026-10-22T11:56:30+08:00'
+                          changeSummary: 电子签名，正文锁定
+                      createdAt: '2026-10-22T11:38:20+08:00'
+                      updatedAt: '2026-10-22T11:56:30+08:00'
+        '400':
+          $ref: '#/components/responses/ErrInvalidParam'
+        '401':
+          $ref: '#/components/responses/ErrUnauthenticated'
+        '403':
+          $ref: '#/components/responses/ErrRoleForbidden'
+        '404':
+          $ref: '#/components/responses/ErrResourceNotFound'
+        '503':
+          $ref: '#/components/responses/ErrInternal'
+
+  /api/v1/reports/{reportId}/sign:
+    post:
+      tags: [Reports]
+      operationId: signReport
+      summary: 医师电子签名（SM2 + CA + TSA）
+      description: |
+        符合 WS/T 847—2024《医学电子文档数字签名技术标准》与《电子签名法》第十三条。
+
+        签名流程（服务端编排，密码运算全部委托密码机，应用层不实现密码算法）：
+        1. **证书校验**：有效期 -> 颁发者链 -> 吊销列表。任一失败禁止签名（WS/T 847 要求）。
+        2. **时间源校验**：向 TSA 请求权威时间，与本机时间偏移 > 60s -> **拒绝签名**，
+           **不得用本地时间兜底**（AC-15，架构方案 12.2 E9）。
+        3. **摘要绑定**：对报告规范化正文做 SM3 摘要（`bodyDigest`），与签名一同存储。
+           正文改一字符，摘要变化 -> 原签名立即失效（AC-14）。
+        4. **签名与时间戳同时执行**，一一对应（WS/T 847）。
+        5. **前置业务校验**：五类受控字段任一为空 -> `code 10001`（AC-12）；
+           AI 标记未全部确认 -> `code 20002`（AC-11）；
+           未审核 -> `code 50001`。
+        6. **签名日志独立写入 `signature_logs`**（含流水号、原文唯一序列号、
+           服务主体标识、原文摘要值、摘要算法标识、证书序列号、签名数据），
+           日志本身可被数字签名验证（WS/T 847，COM-10）。
+        7. 成功后 `status = signed`，报告正文与关联规划方案**一并锁定**。
+
+        **签名超时机制**：前端弹窗 5 分钟无操作自动关闭，须重新 UKey 认证
+        （WS/T 847 超时要求）。
+
+        **幂等**：同一 `Idempotency-Key` 重复提交返回同一签名结果，
+        **不产生第二条流水号**（避免同一份报告出现两个签名记录）。
+
+        签名值 `signatureValue` 为 Base64 编码的 SM2 签名值（DER 编码），
+        由前端 UKey 内的私钥对 `SM3(nonce || reportId || version || bodyDigest)` 签名得到。
+        **私钥不出 UKey**。
+      x-audit: true
+      x-audit-event: REPORT_SIGNED
+      x-audit-phi: true
+      x-idempotent: true
+      parameters:
+        - $ref: '#/components/parameters/ReportIdPath'
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignReportRequest'
+            examples:
+              validSign:
+                summary: 正常签名
+                value:
+                  reportVersion: 4
+                  digestAlgorithm: SM3
+                  ukeyCertSerial: '7921456789012345678901234567890'
+                  nonce: 'b3f1c7e5092a4d68b1e3f5a7c9d2e4f6'
+                  signatureValue: 'MEUCIQDR3vJ7NmQ0Kx8pL2sT5wYb9cF1hA4dE6gH8jK0mN2oP4qR6sT8uV0wX2yZ4aB6cD8eF0gH2iJ4kL6mN8oP0qR2sT4uV6wX8yZ0aB2cD4eF6gH8iJ0kL2mN4oP6qR8sT0uV2wX4yZ6aB8cD0eF2gH4iJ6kL8mN0oP2qR4sT6uV8wX0yZ2aB4cD6eF8gH0iJ2kL4mN6oP8q=='
+      responses:
+        '200':
+          description: 签名成功，报告已锁定
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SignReportResponse'
+              examples:
+                signed:
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      signatureId: 'sig-0a8313c8-4e52'
+                      reportId: 'r-0a8312b7-9d33'
+                      reportVersion: 4
+                      serialNo: 'SN-2026-10-22-000117'
+                      documentUniqueSn: '1.2.840.10008.5.1.4.1.1.88.20261022115630.4471'
+                      subjectId: 'u-1-0a82f1a9'
+                      subjectNameMasked: '周*'
+                      digestAlgorithm: SM3
+                      digestValue: '3a7d5b1e9c2f48096a3f1c8e7d5b2a40c9e3f7a1b6d2048e9c5f3a7b1d6e2c94'
+                      signatureAlgorithm: SM2
+                      signatureValue: 'MEUCIQDR3vJ7NmQ0Kx8pL2sT5wYb9cF1hA4dE6gH8jK0mN2oP4qR6sT8uV0wX2yZ4aB6cD8eF0gH2iJ4kL6mN8oP0qR2sT4uV6wX8yZ0aB2cD4eF6gH8iJ0kL2mN4oP6qR8sT0uV2wX4yZ6aB8cD0eF2gH4iJ6kL8mN0oP2qR4sT6uV8wX0yZ2aB4cD6eF8gH0iJ2kL4mN6oP8q=='
+                      certSerial: '7921456789012345678901234567890'
+                      signedAt: '2026-10-22T11:56:30+08:00'
+                      tsaAuthority: 'CN=示范市权威时间戳服务, O=示范市计量院, C=CN'
+                      tsaToken: '<示例TSA时间戳令牌，非真实凭证>'
+                      logSerialNo: 'SIGLOG-20261022-000117'
+                      reportLocked: true
+                      lockedScope: [report_body, plan_payload]
+                      verified: true
+                      idempotentReplay: false
+                replay:
+                  summary: 幂等重放（同一流水号，未产生第二条签名记录）
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      signatureId: 'sig-0a8313c8-4e52'
+                      reportId: 'r-0a8312b7-9d33'
+                      reportVersion: 4
+                      serialNo: 'SN-2026-10-22-000117'
+                      documentUniqueSn: '1.2.840.10008.5.1.4.1.1.88.20261022115630.4471'
+                      subjectId: 'u-1-0a82f1a9'
+                      subjectNameMasked: '周*'
+                      digestAlgorithm: SM3
+                      digestValue: '3a7d5b1e9c2f48096a3f1c8e7d5b2a40c9e3f7a1b6d2048e9c5f3a7b1d6e2c94'
+                      signatureAlgorithm: SM2
+                      signatureValue: 'MEUCIQDR3vJ7NmQ0Kx8pL2sT5wYb9cF1hA4dE6gH8jK0mN2oP4qR6sT8uV0wX2yZ4aB6cD8eF0gH2iJ4kL6mN8oP0qR2sT4uV6wX8yZ0aB2cD4eF6gH8iJ0kL2mN4oP6qR8sT0uV2wX4yZ6aB8cD0eF2gH4iJ6kL8mN0oP2qR4sT6uV8wX0yZ2aB4cD6eF8gH0iJ2kL4mN6oP8q=='
+                      certSerial: '7921456789012345678901234567890'
+                      signedAt: '2026-10-22T11:56:30+08:00'
+                      tsaAuthority: 'CN=示范市权威时间戳服务, O=示范市计量院, C=CN'
+                      tsaToken: '<示例TSA时间戳令牌，非真实凭证>'
+                      logSerialNo: 'SIGLOG-20261022-000117'
+                      reportLocked: true
+                      lockedScope: [report_body, plan_payload]
+                      verified: true
+                      idempotentReplay: true
+        '400':
+          description: |
+            参数错误，或五类受控字段缺失（AC-12）。响应 `data.missingFields`
+            列出缺失字段供前端定位。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                missingControlledField:
+                  summary: 受控字段缺失，阻断签名
+                  value:
+                    code: 10001
+                    message: '受控字段不完整，无法签名'
+                    traceId: '01JB2QB0V6WM2P6X1Y3B5'
+                    data:
+                      missingFields: [impression]
+                invalidNonce:
+                  summary: nonce 过期（签名超时，WS/T 847）
+                  value:
+                    code: 10001
+                    message: '签名会话已超时，请重新进行 UKey 认证'
+                    traceId: '01JB2QB0W7XN3Q7Y2Z4C6'
+        '401':
+          $ref: '#/components/responses/ErrUnauthenticated'
+        '403':
+          description: |
+            无签名权限（`code 10003`）。实习/试用期医师角色 `roles` 不含
+            `report_signer`，架构方案 §10.1 权限矩阵明确禁止其签名。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: 10003
+                message: '当前角色无报告签名权限'
+                traceId: '01JB2QB0X8YO4R8Z3A5D7'
+        '404':
+          $ref: '#/components/responses/ErrResourceNotFound'
+        '409':
+          description: |
+            业务前置不满足：
+            `50001` 未审核不可签名 / `50003` 报告已签名（重复签名）/ `20002` AI 标记未全部确认。
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                notReviewed:
+                  summary: 未审核
+                  value:
+                    code: 50001
+                    message: '报告尚未通过上级医师审核，不可签名'
+                    traceId: '01JB2QB0Y9ZP5S9A4B6E8'
+                alreadySigned:
+                  summary: 已签名
+                  value:
+                    code: 50003
+                    message: '报告已签署并锁定，不可重复签名'
+                    traceId: '01JB2QB0Z-AQ6T0B5C7F9'
+                aiNotConfirmed:
+                  summary: AI 标记未全部确认（AC-11）
+                  value:
+                    code: 20002
+                    message: '存在未确认的 AI 辅助标记，无法签名'
+                    traceId: '01JB2QB11ABR7U1C6D80A'
+                    data:
+                      unconfirmedCount: 4
+                      totalCount: 8
+        '503':
+          description: 密码机或 TSA 不可达（50002），或时间偏移超阈值被拒（AC-15）
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                hsmUnavailable:
+                  summary: 签名服务不可达
+                  value:
+                    code: 50002
+                    message: '签名服务暂时不可用，未产生任何签名数据，请稍后重试'
+                    traceId: '01JB2QB12BPS8V2D7E91B'
+                clockDrift:
+                  summary: 时间偏移超阈值，拒绝签名且不用本地时间兜底
+                  value:
+                    code: 50002
+                    message: '本机时间与权威时间源偏差过大，已拒绝签名，请联系信息科校准系统时间'
+                    traceId: '01JB2QB13CQT9W3E8FA2C'
+                    data:
+                      driftSeconds: 184
+                      thresholdSeconds: 60
+
+  /api/v1/audit-logs:
+    get:
+      tags: [Audit]
+      operationId: queryAuditLogs
+      summary: 审计日志查询（管理员 / 质控科只读）
+      description: |
+        多维检索审计日志（PRD AUD-01 要求按操作人、事件类型、患者标识、时间范围检索）。
+
+        **只读**：本端点不提供任何写、删、改能力。`audit_logs` 表在数据库层
+        已 `REVOKE UPDATE, DELETE`，并由规则触发器阻断（ADR-004、等保 8.1.4.3）。
+        质控科角色只能读，不能导出到院外（PRD OOS-08 排除科研导出）。
+
+        **链完整性**：响应 `chainVerification` 给出本次返回区间的 hash chain 校验结果。
+        校验失败（`valid: false`）说明审计数据被篡改或损坏，
+        前端须以最高告警样式呈现并禁止继续业务操作（R6）。
+
+        留存：≥6 个月（等保 8.1.4.3），本设计按月分区保留 3 年在线 + 归档。
+
+        越权与不存在返回同一响应（见 info.description §4.1）。
+      x-audit: true
+      x-audit-event: AUDIT_LOG_QUERIED
+      x-audit-phi: true
+      x-idempotent: false
+      parameters:
+        - $ref: '#/components/parameters/ActorId'
+        - $ref: '#/components/parameters/EventType'
+        - $ref: '#/components/parameters/PatientId'
+        - $ref: '#/components/parameters/ResourceType'
+        - $ref: '#/components/parameters/Result'
+        - $ref: '#/components/parameters/EventTimeFrom'
+        - $ref: '#/components/parameters/EventTimeTo'
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Limit'
+        - name: verifyChain
+          in: query
+          required: false
+          description: 是否对本次返回区间做 hash chain 校验。质控追溯场景建议开启。
+          schema:
+            type: boolean
+            default: true
+      responses:
+        '200':
+          description: 审计记录
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/XRequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditLogListResponse'
+              examples:
+                queryResult:
+                  summary: 越权访问尝试 + 正常调阅
+                  value:
+                    code: 0
+                    message: ''
+                    data:
+                      items:
+                        - auditLogId: 'a-0a8320d4-1b62'
+                          eventTime: '2026-10-22T11:31:07+08:00'
+                          actorId: 'u-5-0a82e220'
+                          actorNameMasked: '赵*'
+                          actorDepartment: 肝胆外科
+                          actorRoles: [surgery_physician]
+                          eventType: STUDY_SERIES_VIEWED
+                          result: denied
+                          resultCode: 10004
+                          patientId: 'EMPI0000384721'
+                          patientNameMasked: '张*明'
+                          resourceType: study
+                          resourceId: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+                          sourceIp: '10.20.31.57'
+                          terminalId: 'WKS-IMG-0412'
+                          detail:
+                            reason: '不在授权范围（未获该患者转诊授权）'
+                            seriesCount: 4
+                          hashPrev: '4e7a1c9f2b5d8409a6c3e8f1b4d7a0c93e6f9b2d5a8c1e4f7b0d3a6c9e2f5b8d1'
+                          hashSelf: '9c2e5a8f1b4d7e0a3c6f9b2d5e8a1c4f7b0d3a6c9e2f5b8d1a4c7e0f3b6d9a2c5'
+                        - auditLogId: 'a-0a8320c8-6f31'
+                          eventTime: '2026-10-22T11:04:16+08:00'
+                          actorId: 'svc-ai-worker'
+                          actorNameMasked: '系统'
+                          actorDepartment: null
+                          actorRoles: [service_account]
+                          eventType: SEGMENTATION_TASK_FAILED
+                          result: failure
+                          resultCode: 40002
+                          patientId: 'EMPI0000384721'
+                          patientNameMasked: '张*明'
+                          resourceType: segmentation_task
+                          resourceId: 'seg-0a8303d1-4a08'
+                          sourceIp: '10.20.41.12'
+                          terminalId: null
+                          detail:
+                            failedAtStep: inference
+                            model: total
+                            modelVersion: 2.18.0
+                            progressPercent: 45
+                          hashPrev: '1b4d7a0c93e6f9b2d5a8c1e4f7b0d3a6c9e2f5b8d1a4c7e0f3b6d9a2c5e8f1b4d'
+                          hashSelf: '5a8c1e4f7b0d3a6c9e2f5b8d1a4c7e0f3b6d9a2c5e8f1b4d7a0c93e6f9b2d5'
+                      total: 2
+                      page: 1
+                      limit: 20
+                      hasMore: false
+                      chainVerification:
+                        valid: true
+                        checkedRows: 2
+                        firstHashPrev: '1b4d7a0c93e6f9b2d5a8c1e4f7b0d3a6c9e2f5b8d1a4c7e0f3b6d9a2c5e8f1b4d'
+                        lastHashSelf: '9c2e5a8f1b4d7e0a3c6f9b2d5e8a1c4f7b0d3a6c9e2f5b8d1a4c7e0f3b6d9a2c5'
+                        verifiedAt: '2026-10-22T11:33:02+08:00'
+        '400':
+          $ref: '#/components/responses/ErrInvalidParam'
+        '401':
+          $ref: '#/components/responses/ErrUnauthenticated'
+        '403':
+          $ref: '#/components/responses/ErrRoleForbidden'
+        '404':
+          $ref: '#/components/responses/ErrPatientScopeHidden'
+        '503':
+          $ref: '#/components/responses/ErrInternal'
+
+components:
+
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Keycloak 26.8.1 签发的访问令牌。载荷含 `sub`（用户 ID）、`dept`（科室）、
+        `roles`（角色数组）、`ukey_cert_serial`（UKey 证书序列号，证明第二因素已完成）、
+        `jti`（令牌 ID，用于登出吊销）。
+
+        前端须在 `services/http.ts` 统一注入，组件内禁止直接 fetch。
+
+  headers:
+    XRequestId:
+      description: 链路追踪 ID。报障时凭此 ID 在 Loki 检索完整链路
+      schema:
+        type: string
+      example: '01JB2QA1M8KD3F7P2R5T9'
+
+  parameters:
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        幂等键，UUID v4 格式。同一键 + 同一请求体 -> 返回首次结果（`data.idempotentReplay = true`）；
+        同一键 + 不同请求体 -> `code 10001`。服务端保留 24 小时。
+
+        幂等是**硬需求**而非优化：Redis Stream 是至少一次投递，重投若不幂等会产生重复 GPU 计算；
+        签名重试若不幂等会产生两个签名流水号，使同一份报告出现两个有效签名（法律风险）。
+      schema:
+        type: string
+        format: uuid
+        maxLength: 36
+      example: 'b3f1c7e5-092a-4d68-b1e3-f5a7c9d2e4f6'
+
+    StudyUidPath:
+      name: studyUid
+      in: path
+      required: true
+      description: DICOM Study Instance UID
+      schema:
+        type: string
+        pattern: '^[0-9]+(\.[0-9]+)+$'
+        maxLength: 64
+      example: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+
+    TaskIdPath:
+      name: taskId
+      in: path
+      required: true
+      description: 分割任务 ID（UUID v7，不可枚举）
+      schema:
+        type: string
+        pattern: '^seg-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      example: 'seg-0a8301f4-77b2-4c3d-9a15-7e2b8c6d0f13'
+
+    PlanIdPath:
+      name: planId
+      in: path
+      required: true
+      description: 规划方案 ID（UUID v7，不可枚举）
+      schema:
+        type: string
+        pattern: '^plan-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      example: 'plan-0a8305f2-3e91-4a72-b6d8-1c4e9f0a2b57'
+
+    ReportIdPath:
+      name: reportId
+      in: path
+      required: true
+      description: 报告 ID（UUID v7，不可枚举）
+      schema:
+        type: string
+        pattern: '^r-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+      example: 'r-0a8312b7-9d33-4e18-b2c7-5a0d3e6f8b94'
+
+    PatientId:
+      name: patientId
+      in: query
+      required: false
+      description: 患者主索引号 EMPI。精确匹配（走 `patients` 主索引）
+      schema:
+        type: string
+        pattern: '^EMPI[0-9]{10}$'
+      example: 'EMPI0000384721'
+
+    AccessionNo:
+      name: accessionNo
+      in: query
+      required: false
+      description: 检查号 ACC（走 `idx_studies_accession` 唯一索引）
+      schema:
+        type: string
+        maxLength: 32
+      example: 'ACC20261022017'
+
+    Modality:
+      name: modality
+      in: query
+      required: false
+      description: DICOM Modality
+      schema:
+        $ref: '#/components/schemas/Modality'
+      example: CT
+
+    StudyDateFrom:
+      name: studyDateFrom
+      in: query
+      required: false
+      description: 检查日期起（含）
+      schema:
+        type: string
+        format: date-time
+      example: '2026-10-01T00:00:00+08:00'
+
+    StudyDateTo:
+      name: studyDateTo
+      in: query
+      required: false
+      description: 检查日期止（含）
+      schema:
+        type: string
+        format: date-time
+      example: '2026-10-31T23:59:59+08:00'
+
+    StudyStatus:
+      name: status
+      in: query
+      required: false
+      description: 检查状态
+      schema:
+        $ref: '#/components/schemas/StudyStatus'
+
+    VisitType:
+      name: visitType
+      in: query
+      required: false
+      description: 就诊类型。用于按门急诊/住院分别套用留存策略
+      schema:
+        $ref: '#/components/schemas/VisitType'
+
+    ActorId:
+      name: actorId
+      in: query
+      required: false
+      description: 操作人用户 ID（走 `idx_audit_actor_time`）
+      schema:
+        type: string
+      example: 'u-1-0a82f1a9'
+
+    EventType:
+      name: eventType
+      in: query
+      required: false
+      description: |
+        事件类型。可重复传（多选）。枚举覆盖 PRD AUD-01 列出的 9 类操作 +
+        登录与权限变更。完整枚举见 `AuditEventType`。
+      schema:
+        type: array
+        minItems: 1
+        maxItems: 20
+        items:
+          $ref: '#/components/schemas/AuditEventType'
+
+    ResourceType:
+      name: resourceType
+      in: query
+      required: false
+      description: 资源类型过滤
+      schema:
+        type: string
+        enum: [study, series, instance, segmentation_task, plan, report, signature, user, role, patient_grant]
+      example: report
+
+    Result:
+      name: result
+      in: query
+      required: false
+      description: |
+        操作结果。`denied` 表示越权被拒（架构方案 10.4：失败路径同样写审计，
+        越权拒绝是合规追溯的关键线索，不允许漏记）。
+      schema:
+        type: string
+        enum: [success, failure, denied]
+
+    EventTimeFrom:
+      name: eventTimeFrom
+      in: query
+      required: false
+      description: 事件时间起（含）
+      schema:
+        type: string
+        format: date-time
+      example: '2026-10-01T00:00:00+08:00'
+
+    EventTimeTo:
+      name: eventTimeTo
+      in: query
+      required: false
+      description: 事件时间止（含）
+      schema:
+        type: string
+        format: date-time
+      example: '2026-10-22T23:59:59+08:00'
+
+    Page:
+      name: page
+      in: query
+      required: false
+      description: 页码，从 1 开始
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: 每页条数
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 20
+
+    Sort:
+      name: sort
+      in: query
+      required: false
+      description: |
+        排序字段。仅允许白名单字段（防注入），`order` 由 `order` 参数控制。
+      schema:
+        type: string
+        enum: [studyDate, createdAt, updatedAt, accessionNo]
+        default: studyDate
+
+    Order:
+      name: order
+      in: query
+      required: false
+      description: 排序方向
+      schema:
+        type: string
+        enum: [asc, desc]
+        default: desc
+
+    Deidentify:
+      name: x-deidentify
+      in: header
+      required: false
+      description: |
+        脱敏开关。默认 `true`（姓名掩码 + 身份证掩码）。
+        置 `false` 时后端可返回完整姓名，但**仅**质控科与病案管理角色可用，
+        且该路径强制写审计事件 `DEIDENTIFICATION_OVERRIDE`。
+
+        身份证**任何情况下都只返回掩码**，本参数不放开身份证。
+      schema:
+        type: boolean
+        default: true
+
+    IncludeStructures:
+      name: includeStructures
+      in: query
+      required: false
+      description: 是否返回 AI 结构化量化结果（`structures[]`）。轮询状态时可关闭以减小载荷
+      schema:
+        type: boolean
+        default: true
+
+  responses:
+    ErrInvalidParam:
+      description: 参数错误（10001）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            default:
+              value:
+                code: 10001
+                message: '请求参数不合法'
+                traceId: '01JB2QB2A0RU6X4Y9Z0C1'
+
+    ErrUnauthenticated:
+      description: 未认证（10002）。Token 缺失、过期或签名不合法
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            expired:
+              value:
+                code: 10002
+                message: '会话已过期，请重新登录'
+                traceId: '01JB2QB2B1SV7Y5Z0A1D2'
+            ukeyMissing:
+              value:
+                code: 10002
+                message: '会话未绑定 UKey 数字证书，无法访问受保护资源'
+                traceId: '01JB2QB2C2TW8Z6A1B2E3'
+
+    ErrRoleForbidden:
+      description: 无权限（10003，角色级）。与患者是否存在无关，响应体可区分
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            roleDenied:
+              value:
+                code: 10003
+                message: '当前角色无此操作权限'
+                traceId: '01JB2QB2D3UX9A7B2C3F4'
+
+    ErrPatientScopeHidden:
+      description: |
+        **数据级越权或资源不存在，返回同一响应**（HTTP 404 + `code 10004`）。
+
+        设计依据见 info.description §4.1：10004 与 10005 在 PHI 可导航路径上合并为单一码，
+        响应时间、状态码、响应体大小三者不可区分，防止时序侧信道泄露患者存在性
+        （PRD COM-03、等保 8.1.4.2、风险 R7）。
+
+        ---
+        **与前端 UI 的强约束（UIUX-P2 §3.6 / §2.5 / UIUX §9.9）**：
+
+        1. **文案禁止泄露性表述**。`message` 为固定常量「请求的资源不可用」，
+           **禁止**出现「该患者不存在」「您无权访问该患者」「查无此检查」等
+           可反推患者是否存在的措辞。前端亦不得根据本地已知信息补充这类文案。
+
+        2. **两种情形共用同一套 UI**。越权与不存在对用户是同一件事：
+           「你现在看不到这份检查」。前端**禁止**区分渲染，
+           禁止对 10004 与 10005 使用不同的空态或错误态组件。
+
+        3. **图标语义**。建议 `tabler:lock-access`（表达权限边界）
+           而非 `tabler:alert-triangle` —— 后者暗示「出错/异常」，
+           语义不准且会把正常的权限边界渲染成故障态。
+           这与危急值的 `tabler:alert-triangle` 也不冲突：
+           危急值三重编码（颜色 + alert-triangle + 文字）用于**急诊标识**，
+           与本处的**访问受限**是两种不同语义，不应复用同一图标。
+
+        4. **不得据此重试**。10004 不是可重试错误，
+           前端不应显示「重试」按钮（重试不会改变权限结论）。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            hidden:
+              value:
+                code: 10004
+                message: '请求的资源不可用'
+                traceId: '01JB2QB2E4VY0B8C3D4G5'
+
+    ErrResourceNotFound:
+      description: |
+        资源不存在（10005）。仅用于主键为 UUID v7 的非 PHI 导航资源 ——
+        122 bit 熵不可枚举，不构成患者存在性预言机。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            notFound:
+              value:
+                code: 10005
+                message: '资源不存在'
+                traceId: '01JB2QB2F5WZ1C9D4E5H6'
+
+    ErrPacsUnreachable:
+      description: PACS 不可达（30001）
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            unreachable:
+              value:
+                code: 30001
+                message: '影像归档服务暂时不可用，请稍后重试或联系信息科'
+                traceId: '01JB2QB3G6XA2D0E5F6J7'
+
+    ErrPacsInstanceFetch:
+      description: |
+        序列拉取失败（30003）。响应 `data.loadedInstanceCount` 告知已成功加载的层数，
+        前端须显示已加载层数与失败原因，**禁止白屏**（架构方案 12.2 E4）。
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            partialFailure:
+              value:
+                code: 30003
+                message: '影像数据拉取中断，已加载部分层'
+                traceId: '01JB2QB3H7YB3E1F6G7K8'
+                data:
+                  loadedInstanceCount: 412
+                  requestedInstanceCount: 306
+                  failedSliceRange: [206, 248]
+                  retryable: true
+
+    ErrInternal:
+      description: 内部错误（90001）。**不得暴露堆栈、SQL、内部主机名**
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          examples:
+            default:
+              value:
+                code: 90001
+                message: '服务处理异常，请携带追踪 ID 联系信息科'
+                traceId: '01JB2QB3I8ZC4F2G7H8L9'
+
+  schemas:
+
+    ErrorResponse:
+      type: object
+      description: |
+        统一错误响应。`code` 为 0 表示成功（见各端点成功响应）。
+        错误时 `data` 通常为 `null`，但部分业务错误（如 409 版本冲突）会带定位信息。
+      required: [code, message]
+      properties:
+        code:
+          type: integer
+          description: 业务错误码。段位含义见 info.description §4
+          example: 10004
+        message:
+          type: string
+          description: |
+            人类可读描述。**PHI 越权类错误（10004）必须使用固定常量字符串**，
+            禁止拼接资源名、患者名、时间戳等可变内容，否则响应体大小差异会成为侧信道。
+          example: '请求的资源不可用'
+        traceId:
+          type: string
+          description: 链路追踪 ID，用于向信息科报障
+          example: '01JB2QB2E4VY0B8C3D4G5'
+        data:
+          nullable: true
+          description: 错误定位信息。可选，按错误类型提供
+          oneOf:
+            - $ref: '#/components/schemas/ModelLicenseRejectedDetail'
+            - $ref: '#/components/schemas/PlanVersionConflictDetail'
+            - $ref: '#/components/schemas/SignFieldMissingDetail'
+            - $ref: '#/components/schemas/AiNotConfirmedDetail'
+            - $ref: '#/components/schemas/PacsPartialFailureDetail'
+            - $ref: '#/components/schemas/ClockDriftDetail'
+      additionalProperties: false
+
+    ModelLicenseRejectedDetail:
+      type: object
+      description: |
+        模型许可拒绝详情（code 40003 / AC-09）。
+        供 UIUX-P2 §4.3 拒绝态展示「请求模型 + 许可协议 + 错误码 + 可用模型下拉 + 已记入审计」。
+
+        合规要点：`auditRecorded` 恒为 `true`。
+        **白名单拒绝本身是必须留痕的合规事件**（PRD COM-08 可追溯要求）——
+        反复尝试使用未授权模型是一个需要被发现的信号。
+      required: [requestedModel, requestedLicense, rejectionReason, allowedModels, auditRecorded, auditEventType]
+      properties:
+        requestedModel:
+          type: string
+          description: 被拒的模型 task 名
+          example: 'brain_aneurysm'
+        requestedLicense:
+          type: string
+          description: 该 task 的权重许可协议
+          example: 'CC BY-NC 4.0'
+        rejectionReason:
+          type: string
+          description: 拒绝原因（面向医师的可读说明）
+          example: '该 task 为非商业许可，不提供商业使用授权'
+        allowedModels:
+          type: array
+          description: 许可白名单内的可用模型，供 UI 提供替换下拉
+          items:
+            $ref: '#/components/schemas/SegmentationModel'
+        auditRecorded:
+          type: boolean
+          description: |
+            本次拒绝是否已写入审计。**恒为 `true`** ——
+            审计写入失败则整个请求失败，不允许静默丢弃（架构方案 §10.4）。
+          example: true
+        auditEventType:
+          type: string
+          description: 对应的审计事件类型
+          enum: ['segmentation_task_rejected']
+      additionalProperties: false
+
+    PlanVersionConflictDetail:
+      type: object
+      description: 乐观锁冲突定位信息（HTTP 409 / code 20003）
+      required: [currentVersion]
+      properties:
+        currentVersion:
+          type: integer
+          description: 服务端当前版本号
+          example: 5
+        conflictingEditorId:
+          type: string
+          description: 最后编辑者用户 ID
+          example: 'u-3-0a82d117'
+        conflictingEditorMasked:
+          type: string
+          description: 最后编辑者姓名（掩码）
+          example: '王*'
+        updatedAt:
+          type: string
+          format: date-time
+          description: 最后编辑时间
+          example: '2026-10-22T11:25:41+08:00'
+      additionalProperties: false
+
+    SignFieldMissingDetail:
+      type: object
+      description: 签名被拒：受控字段缺失定位（code 10001）
+      required: [missingFields]
+      properties:
+        missingFields:
+          type: array
+          description: 缺失的受控字段标识。AC-12：五类受控字段任一为空即阻断签名
+          items:
+            $ref: '#/components/schemas/ControlledFieldKey'
+          example: [impression]
+      additionalProperties: false
+
+    AiNotConfirmedDetail:
+      type: object
+      description: 签名/提交被拒：AI 辅助标记未全部确认（code 20002）
+      required: [unconfirmedCount, totalCount]
+      properties:
+        unconfirmedCount:
+          type: integer
+          example: 4
+        totalCount:
+          type: integer
+          example: 8
+      additionalProperties: false
+
+    PacsPartialFailureDetail:
+      type: object
+      description: 取图部分失败（code 30003）
+      required: [loadedInstanceCount, requestedInstanceCount]
+      properties:
+        loadedInstanceCount:
+          type: integer
+          example: 412
+        requestedInstanceCount:
+          type: integer
+          example: 306
+        failedSliceRange:
+          type: array
+          description: 失败的层号区间
+          items:
+            type: integer
+          minItems: 2
+          maxItems: 2
+          example: [206, 248]
+        retryable:
+          type: boolean
+          example: true
+      additionalProperties: false
+
+    ClockDriftDetail:
+      type: object
+      description: 时间偏移超阈值（code 50002，AC-15）。**不得用本地时间兜底**
+      required: [driftSeconds, thresholdSeconds]
+      properties:
+        driftSeconds:
+          type: integer
+          example: 184
+        thresholdSeconds:
+          type: integer
+          example: 60
+      additionalProperties: false
+
+    PaginationMeta:
+      type: object
+      required: [total, page, limit, hasMore]
+      properties:
+        total:
+          type: integer
+          description: 符合条件的总条数
+          example: 2
+        page:
+          type: integer
+          example: 1
+        limit:
+          type: integer
+          example: 20
+        hasMore:
+          type: boolean
+          description: 是否还有下一页。前端据此决定是否无限滚动
+          example: false
+      additionalProperties: false
+
+    Modality:
+      type: string
+      description: DICOM Modality
+      enum: [CT, MR, US, XA, CR, DX, MG, NM, PT, PET]
+
+    StudyStatus:
+      type: string
+      description: 检查状态
+      enum: [registered, in_progress, completed, archived, cancelled]
+
+    VisitType:
+      type: string
+      description: |
+        就诊类型。**决定报告留存期限**：
+        `outpatient` / `emergency` -> ≥15 年；`inpatient` -> ≥30 年（AC-20、国卫医发〔2013〕31 号）。
+      enum: [outpatient, emergency, inpatient, physical_exam, day_surgery]
+
+    SeriesPhase:
+      type: string
+      description: |
+        序列期相（DCM-02 自动分组）。
+        `unknown` 表示期相识别置信度不足，前端须显示「期相待人工确认」且不得默认选中。
+      enum: [plain, arterial, portal, delayed, unknown]
+
+    PhaseLabel:
+      type: string
+      description: 期相中文标签
+      enum: [平扫, 动脉期, 门脉期, 延迟期, 期相待确认]
+
+    StructureName:
+      type: string
+      description: |
+        解剖结构标识符，取自 TotalSegmentator 2.18.0 的结构类别名（英文 snake_case）。
+        **这是解剖结构名，不是病灶名，更不是诊断结论。**
+      enum:
+        - liver
+        - liver_right_lobe
+        - liver_left_lobe
+        - portal_vein
+        - inferior_vena_cava
+        - gallbladder
+        - pancreas
+        - spleen
+        - right_kidney
+        - left_kidney
+        - urinary_bladder
+        - stomach
+        - duodenum
+        - aorta
+        - lung_left
+        - lung_right
+        - esophagus
+        - trachea
+        - heart
+        - spine
+
+    StructureLabelZh:
+      type: string
+      description: 解剖结构中文标签（仅用于界面显示）
+      enum: [肝脏, 肝右叶, 肝左叶, 门静脉, 下腔静脉, 胆囊, 胰腺, 脾脏, 右肾, 左肾, 膀胱, 胃, 十二指肠, 主动脉, 左肺, 右肺, 食管, 气管, 心脏, 脊柱]
+
+    SegmentationModel:
+      type: string
+      description: |
+        AI 分割模型 task 名。**枚举即 Apache-2.0 许可白名单**（本契约只暴露 MVP 需要的 4 个）。
+
+        TotalSegmentator 2.18.0 共 46 个 task，其中仅 31 个标注为 Apache-2.0。
+        白名单外的 task（含 `brain_aneurysm`，CC BY-NC 4.0 且不提供商业许可）
+        服务端在**启动时**以常量校验拒绝，并返回 `code 40003` + 写审计（AC-09）。
+
+        新增 task 需法务确认许可，并同步修改本枚举与 AI 服务白名单常量。
+      enum: [total, total_mr, liver_segments, lung_vessels]
+
+    PlanType:
+      type: string
+      description: |
+        规划方案类型。由**执业医师**选择，AI 不参与该字段生成。
+        注意：方案类型不是「治疗建议」，而是规划工具的工作模式选择。
+      enum:
+        - hepatic_wedge_resection
+        - hepatic_right_lobectomy
+        - nephro_partial_resection
+        - pulmonary_lobectomy
+        - thoracic_wedge_resection
+        - abdominal_puncture_path
+
+    ControlledFieldKey:
+      type: string
+      description: 五类受控字段标识（RPT-01）
+      enum: [examBodyPart, scanMode, findings, impression, followUpRecommendation]
+
+    AuditEventType:
+      type: string
+      description: |
+        审计事件类型。覆盖 PRD AUD-01 列出的 9 类 PHI 操作 + 登录 + 权限变更。
+        枚举新增必须同步 `docs/db/schema.sql` 中的 `CHECK` 约束。
+      enum:
+        - AUTH_LOGIN
+        - AUTH_LOGIN_FAILED
+        - AUTH_LOGOUT
+        - STUDY_LIST_VIEWED
+        - STUDY_SERIES_VIEWED
+        - DICOM_INSTANCES_RETRIEVED
+        - MEASUREMENT_SAVED
+        - SEGMENTATION_TASK_SUBMITTED
+        - SEGMENTATION_TASK_REJECTED
+        - SEGMENTATION_TASK_READ
+        - SEGMENTATION_ITEM_CONFIRMED
+        - PLAN_CREATED
+        - PLAN_UPDATED
+        - REPORT_CREATED
+        - REPORT_VIEWED
+        - REPORT_UPDATED
+        - REPORT_SIGNED
+        - REPORT_EXPORTED
+        - REPORT_ARCHIVED
+        - AUDIT_LOG_QUERIED
+        - PERMISSION_CHANGED
+        - PATIENT_GRANT_CHANGED
+        - DEIDENTIFICATION_OVERRIDE
+
+    AuditResult:
+      type: string
+      description: |
+        审计结果。`denied` = 越权被拒。
+        失败与拒绝路径**必须**记录（架构方案 10.4：不漏审计）。
+      enum: [success, failure, denied]
+
+    LoginRequest:
+      type: object
+      required: [username, password, ukey_cert]
+      properties:
+        username:
+          type: string
+          description: 登录名（工号）
+          maxLength: 64
+          example: 'dr.zhou.liqun'
+        password:
+          type: string
+          description: 口令。**MedPlan 不存储口令**，校验委托 Keycloak
+          format: password
+          minLength: 8
+          maxLength: 128
+        ukey_cert:
+          type: string
+          description: |
+            UKey 中的 SM2 数字证书（Base64 DER）。
+            服务端校验链：有效期 -> 颁发者链 -> 吊销列表 -> 私钥签名验证。
+            任一失败即拒绝，且**不透露失败的具体环节**（避免证书状态侧信道）。
+          maxLength: 8192
+        ukey_pin_block:
+          type: string
+          description: UKey PIN 的 PBKDF2 派生值（不由浏览器明文传输 PIN 本身）
+          maxLength: 128
+      additionalProperties: false
+
+    LoginResponse:
+      type: object
+      description: 统一响应包裹。`code = 0` 为成功
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          enum: [0]
+        message:
+          type: string
+        data:
+          type: object
+          required: [accessToken, refreshToken, tokenType, expiresIn, user, ukey]
+          properties:
+            accessToken:
+              type: string
+              description: 访问令牌（JWT）
+            refreshToken:
+              type: string
+              description: 刷新令牌
+            tokenType:
+              type: string
+              enum: [Bearer]
+            expiresIn:
+              type: integer
+              description: 访问令牌有效期（秒）
+              example: 28800
+            ntpOffsetMs:
+              type: integer
+              description: |
+                本机与权威时间源的偏移（毫秒）。
+                绝对值 > 1000 时前端须提示医师检查系统时间——
+                签名时偏移 > 60000ms 会**拒绝签名**（AC-15）。
+              example: 42
+            user:
+              $ref: '#/components/schemas/SessionUser'
+            ukey:
+              $ref: '#/components/schemas/UKeyInfo'
+          additionalProperties: false
+      additionalProperties: false
+
+    SessionUser:
+      type: object
+      required: [userId, loginName, displayName, title, department, roles]
+      properties:
+        userId:
+          type: string
+          example: 'u-1-0a82f1a9'
+        loginName:
+          type: string
+          example: 'dr.zhou.liqun'
+        displayName:
+          type: string
+          description: 真实姓名。登录响应中可返回明文（本人自视），列表接口一律掩码
+          example: '周立群'
+        title:
+          type: string
+          description: 专业技术职称
+          enum: [主任医师, 副主任医师, 主治医师, 住院医师, 医师, 技师, 护士, 其他]
+        department:
+          type: string
+          description: 所属科室
+          example: '医学影像科'
+        licenseNoMasked:
+          type: string
+          description: 执业证书编号（掩码）
+          example: '110***********4317'
+        roles:
+          type: array
+          description: 角色编码。签名能力由 `report_signer` 决定
+          items:
+            $ref: '#/components/schemas/RoleCode'
+      additionalProperties: false
+
+    RoleCode:
+      type: string
+      description: |
+        角色编码，对应架构方案 §10.1 权限矩阵。
+        `report_signer` 是签名的必要条件（实习/试用期医师无此角色，架构方案明确禁止其签名）。
+      enum:
+        - system_admin
+        - image_chief
+        - image_physician
+        - trainee_physician
+        - surgeon_physician
+        - quality_control
+        - medical_records
+        # 签名权限是**独立角色**，不是 image_physician 的隐含属性。
+        # 架构方案 §10.1：实习/试用期医师虽有 image_physician 角色，
+        # 但无 report_signer，不得签署报告。
+        # 此前该值在契约正文被引用 5 处（roles 数组示例、签名必要条件、权限矩阵），
+        # 却在枚举里缺失 —— 导致契约自相矛盾：声明的合法值不在合法值集合内。
+        - report_signer
+        - service_account
+
+    UKeyInfo:
+      type: object
+      required: [certSerial, subjectName, issuerName, validFrom, validTo, signatureAlgorithm]
+      properties:
+        certSerial:
+          type: string
+          description: 证书序列号（写入签名日志，WS/T 847 要求）
+          example: '7921456789012345678901234567890'
+        subjectName:
+          type: string
+          description: 证书主体 DN
+          example: 'CN=周立群, OU=医学影像科, O=示范市中心医院, C=CN'
+        issuerName:
+          type: string
+          description: 证书颁发者 DN
+          example: 'CN=示范市医院数字证书颁发机构, O=示范市卫生健康委员会, C=CN'
+        validFrom:
+          type: string
+          format: date-time
+        validTo:
+          type: string
+          format: date-time
+        signatureAlgorithm:
+          type: string
+          description: 签名算法。国密要求 SM2
+          enum: [SM2]
+      additionalProperties: false
+
+    PatientBrief:
+      type: object
+      description: 患者摘要。**姓名与身份证一律掩码**（脱敏策略，架构方案 §10.3）
+      required: [patientId, nameMasked, gender, birthDate, ageYears, idCardMasked]
+      properties:
+        patientId:
+          type: string
+          description: 患者主索引号 EMPI
+          example: 'EMPI0000384721'
+        nameMasked:
+          type: string
+          description: |
+            姓名掩码，保留姓氏 + 末字，中间以 `*` 代替（`张*明`）。
+            后端**不提供**返回明文的列表/详情接口；
+            明文仅在登录自视与质控/病案角色受控路径下出现，且强制写审计。
+          example: '张*明'
+        gender:
+          type: string
+          description: DICOM Patient Sex。ISO 5218 代码
+          enum: [M, F, O, '']
+        birthDate:
+          type: string
+          format: date
+          example: '1968-03-14'
+        ageYears:
+          type: integer
+          description: 检查时年龄（岁），由 `birthDate` 与 `studyDate` 计算
+          example: 58
+        idCardMasked:
+          type: string
+          description: |
+            身份证掩码，保留前 3 位与后 4 位。
+            数据库只存 SM3 摘要（`patients.id_card_hash`），**后端无法还原明文**，
+            因此本字段来自院内 EMPI 主索引的既有掩码值，不是由本系统解密而来。
+          example: '310***********1234'
+      additionalProperties: false
+
+    VisitBrief:
+      type: object
+      description: 就诊信息（卫健委电子病历必备字段）
+      required: [visitId, visitNo, visitType, dept]
+      properties:
+        visitId:
+          type: string
+          example: 'v-0a82f1a9-3c74'
+        visitNo:
+          type: string
+          description: 就诊号
+          example: 'MZ20261022017'
+        visitType:
+          $ref: '#/components/schemas/VisitType'
+        dept:
+          type: string
+          description: 申请科室
+          example: '医学影像科'
+        wardDept:
+          type: string
+          nullable: true
+          description: 病区科室。门诊/急诊为 `null`
+          example: '消化内科病区'
+        bedNo:
+          type: string
+          nullable: true
+          description: 床号
+          example: '12-3'
+        admitDate:
+          type: string
+          format: date-time
+          nullable: true
+          example: '2026-10-22T09:48:00+08:00'
+      additionalProperties: false
+
+    StudyBrief:
+      type: object
+      description: 检查信息（卫健委电子病历必备字段）
+      required: [accessionNo, modality, studyDate]
+      properties:
+        accessionNo:
+          type: string
+          description: 检查号 ACC
+          example: 'ACC20261022017'
+        modality:
+          $ref: '#/components/schemas/Modality'
+        bodyPart:
+          type: string
+          description: DICOM Body Part Examined
+          enum: [ABDOMEN, LIVER, CHEST, PELVIS, HEAD, SPINE, EXTREMITY, WHOLE_BODY, OTHER]
+          example: ABDOMEN
+        studyDescription:
+          type: string
+          description: 检查描述（自动带入，不可编辑，RPT-01）
+          example: '腹部平扫+三期增强'
+        studyDate:
+          type: string
+          format: date-time
+          example: '2026-10-22T10:03:36+08:00'
+      additionalProperties: false
+
+    StudyListItem:
+      type: object
+      required: [studyUid, accessionNo, modality, studyDate, status, seriesCount, patient, visit, readStatus, isEmergency, queueWaitSeconds, hasSignedReport, createdAt, updatedAt]
+      properties:
+        studyUid:
+          type: string
+          example: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+        accessionNo:
+          type: string
+          example: 'ACC20261022017'
+        modality:
+          $ref: '#/components/schemas/Modality'
+        bodyPart:
+          type: string
+          enum: [ABDOMEN, LIVER, CHEST, PELVIS, HEAD, SPINE, EXTREMITY, WHOLE_BODY, OTHER]
+        studyDescription:
+          type: string
+          example: '腹部平扫+三期增强'
+        studyDate:
+          type: string
+          format: date-time
+        status:
+          $ref: '#/components/schemas/StudyStatus'
+        seriesCount:
+          type: integer
+          example: 4
+        patient:
+          $ref: '#/components/schemas/PatientBrief'
+        visit:
+          $ref: '#/components/schemas/VisitBrief'
+        reportId:
+          type: string
+          nullable: true
+          description: 关联报告 ID。未建报告为 `null`
+          example: 'r-0a82f209-5d11'
+        readStatus:
+          type: string
+          description: |
+            阅片状态。对应工作台「待阅 / 已阅」两个视图 Tab（UIUX-P2 §2.3）。
+            `unread` = 待阅；`read` = 已阅；`in_progress` = 已开阅未出报告（介于两者之间）。
+
+            状态流转由服务端在调阅动作时推进，前端**不得**自行改写
+            （PRD OPN-01 的医师工作量统计以本字段为唯一数据源，不允许手工填报）。
+          enum: [unread, in_progress, read]
+        readAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: 首次阅片时间。为 `null` 表示尚未阅片
+          example: '2026-10-22T10:31:47+08:00'
+        isEmergency:
+          type: boolean
+          description: |
+            是否急诊。由 `visits.visit_type` 判定，供 StatusBadge 危急值三重编码
+            （颜色 + `tabler:alert-triangle` + 「急诊」文字，AC-22）。
+            服务端下发而非前端比对，避免枚举值写错导致危急值漏标。
+          example: false
+        queueWaitSeconds:
+          type: integer
+          nullable: true
+          description: |
+            **队列等待秒数（服务端算好下发，前端不得重算）。**
+
+            口径：`now() - study_date`，即从影像归档到当前时刻的等待时长。
+            已阅片后停止计时（冻结在 `readAt` 时刻的值），未阅则持续增长。
+
+            为什么必须服务端算（UIUX-P2 §2.5）：
+            1. **时区**：院内跨零点/跨时区场景下，前端本地 diff 与服务端权威时间会分歧
+            2. **口径**：夏令时切换日 `86400` 秒不再是 24 小时
+            3. **合规**：这是进入质控与工作量统计的时长数据，必须单一可信来源
+
+            前端只做展示格式化（「5 小时 12 分」）+ tabular-nums，不做差值计算。
+            为 `null` 表示尚未归档完成或 `study_date` 缺失，此时显示「—」而非「0 分钟」。
+          minimum: 0
+          example: 18720
+        hasSignedReport:
+          type: boolean
+          description: 是否已有已签署报告。用于工作台状态标记
+          example: false
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    StudyListResponse:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          enum: [0]
+        message:
+          type: string
+        data:
+          type: object
+          required: [items, total, page, limit, hasMore]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/StudyListItem'
+            total:
+              type: integer
+            page:
+              type: integer
+            limit:
+              type: integer
+            hasMore:
+              type: boolean
+          additionalProperties: false
+      additionalProperties: false
+
+    SeriesItem:
+      type: object
+      required: [seriesUid, seriesNumber, instanceCount, sliceThicknessMm, rows, columns, transferSyntaxUid]
+      properties:
+        seriesUid:
+          type: string
+          example: '1.2.840.10008.5.1.4.1.1.2.20261022100336.728573'
+        seriesNumber:
+          type: integer
+          description: 序列号。期相分组后仍保留原 DICOM 序号
+          example: 3
+        description:
+          type: string
+          description: 序列描述
+          example: 'Axial 0.5mm 门静脉期'
+        instanceCount:
+          type: integer
+          description: 实例（层）数
+          example: 306
+        sliceThicknessMm:
+          type: number
+          format: float
+          description: 层厚（mm）。薄层阅片指标依赖此值
+          example: 0.5
+        rows:
+          type: integer
+          example: 512
+        columns:
+          type: integer
+          example: 512
+        pixelSpacingMm:
+          type: array
+          description: |
+            像素间距 `[行间距, 列间距]`（mm），DICOM (0018,0050)。
+            长度测量工具据此换算实际毫米值（AC-07）。
+          items:
+            type: number
+            format: float
+          minItems: 2
+          maxItems: 2
+          example: [0.351, 0.351]
+        transferSyntaxUid:
+          type: string
+          description: |
+            DICOM 传输语法 UID。
+            `1.2.840.10008.1.2.4.90` = JPEG 2000 Lossless（薄层 CT 首选，需 openjpeg 1.3.0）；
+            `1.2.840.10008.1.2.1` = 未压缩 Explicit VR Little Endian（降级用，流量约放大 8 倍）。
+          example: '1.2.840.10008.1.2.4.90'
+        windowCenter:
+          type: number
+          format: float
+          description: 推荐窗中心（HU）
+          example: 100
+        windowWidth:
+          type: number
+          format: float
+          description: 推荐窗宽（HU）
+          example: 350
+        isDefaultWindow:
+          type: boolean
+          description: 是否为该部位的推荐默认窗。CT 腹部软窗 / 肺窗 / 骨窗由后端给出
+          example: false
+      additionalProperties: false
+
+    PhaseGroup:
+      type: object
+      required: [phase, phaseLabel, confidence, series]
+      properties:
+        phase:
+          $ref: '#/components/schemas/SeriesPhase'
+        phaseLabel:
+          $ref: '#/components/schemas/PhaseLabel'
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: |
+            期相识别置信度。**< 0.70 时前端须显示「期相待人工确认」且不得默认选中** ——
+            选错期相会导致 AI 分割提交被拒（20002），浪费一次 GPU 任务与 10 分钟时限。
+          example: 0.96
+        series:
+          type: array
+          items:
+            $ref: '#/components/schemas/SeriesItem'
+      additionalProperties: false
+
+    SeriesGroupedResponse:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          enum: [0]
+        message:
+          type: string
+        data:
+          type: object
+          required: [studyUid, modality, totalSeries, totalInstances, phaseGroups]
+          properties:
+            studyUid:
+              type: string
+            accessionNo:
+              type: string
+            modality:
+              $ref: '#/components/schemas/Modality'
+            studyDescription:
+              type: string
+            totalSeries:
+              type: integer
+              example: 4
+            totalInstances:
+              type: integer
+              example: 1042
+            phaseGroups:
+              type: array
+              items:
+                $ref: '#/components/schemas/PhaseGroup'
+          additionalProperties: false
+      additionalProperties: false
+
+    DicomInstanceMetadata:
+      type: object
+      description: |
+        DICOM JSON 模型（DICOM PS3.18 F.2）。键为 8 位十六进制标签，值为
+        `{ vr, Value }` 结构。本契约只列前端阅片必需的标签子集。
+      additionalProperties: true
+      properties:
+        '00100010':
+          type: object
+          description: PatientName (PN)
+          properties:
+            vr:
+              type: string
+              enum: [PN]
+            Value:
+              type: array
+              items:
+                type: string
+        '00080018':
+          type: object
+          description: SOPInstanceUID (UI)
+          properties:
+            vr:
+              type: string
+              enum: [UI]
+            Value:
+              type: array
+              items:
+                type: string
+        '00200013':
+          type: object
+          description: InstanceNumber (IS)
+          properties:
+            vr:
+              type: string
+              enum: [IS]
+            Value:
+              type: array
+              items:
+                type: integer
+        '00280010':
+          type: object
+          description: Rows (US)
+          properties:
+            vr:
+              type: string
+              enum: [US]
+            Value:
+              type: array
+              items:
+                type: integer
+        '00280011':
+          type: object
+          description: Columns (US)
+          properties:
+            vr:
+              type: string
+              enum: [US]
+            Value:
+              type: array
+              items:
+                type: integer
+        '00281050':
+          type: object
+          description: WindowCenter (DS)
+          properties:
+            vr:
+              type: string
+              enum: [DS]
+            Value:
+              type: array
+              items:
+                type: number
+                format: float
+        '00281051':
+          type: object
+          description: WindowWidth (DS)
+          properties:
+            vr:
+              type: string
+              enum: [DS]
+            Value:
+              type: array
+              items:
+                type: number
+                format: float
+
+    WadoRetrieveRequest:
+      type: object
+      required: [studyUid, seriesUid, transferSyntaxUid]
+      properties:
+        studyUid:
+          type: string
+          pattern: '^[0-9]+(\.[0-9]+)+$'
+          maxLength: 64
+        seriesUid:
+          type: string
+          pattern: '^[0-9]+(\.[0-9]+)+$'
+          maxLength: 64
+        instanceNumbers:
+          type: array
+          description: |
+            请求的层号列表（DICOM InstanceNumber，1 起）。
+            省略表示请求整个序列。前端首屏只请求当前切片 ±20 层，预取半径 30 层。
+          items:
+            type: integer
+            minimum: 1
+          maxItems: 200
+        sopInstanceUids:
+          type: array
+          description: |
+            按 SOP Instance UID 精确请求。用于「按需补拉失败层」（30003 后重试）。
+            与 `instanceNumbers` 二选一，同时提供 -> `code 10001`。
+          items:
+            type: string
+          maxItems: 200
+        transferSyntaxUid:
+          type: string
+          description: 期望的传输语法。服务端可降级并在响应头说明
+          example: '1.2.840.10008.1.2.4.90'
+        maxInstances:
+          type: integer
+          description: |
+            单次批量上限。超过则返回 `code 10001`，防止一次请求拖垮阅片首帧
+            （AC-05 首帧 ≤3s）。默认 64，上限 200。
+          minimum: 1
+          maximum: 200
+          default: 64
+        metadataOnly:
+          type: boolean
+          description: |
+            为 `true` 时只返回 DICOM JSON 元数据，不含像素。
+            阅片启动流程：先取元数据渲染序列结构（几十 KB），再渐进填充像素。
+          default: false
+      additionalProperties: false
+
+    CreateSegmentationTaskRequest:
+      type: object
+      required: [studyUid, seriesUid, model, targetPhase]
+      properties:
+        studyUid:
+          type: string
+          pattern: '^[0-9]+(\.[0-9]+)+$'
+        seriesUid:
+          type: string
+          pattern: '^[0-9]+(\.[0-9]+)+$'
+        model:
+          $ref: '#/components/schemas/SegmentationModel'
+        fast:
+          type: boolean
+          description: |
+            是否请求降级模式（3mm 分辨率，推理 1–2 分钟）。
+            请求 `false` 但 GPU 显存 < 12GB 时，服务端**强制** `fast = true`
+            并在响应中置 `degraded = true`（AC-10）。前端须明示降级，不得静默降级。
+          default: false
+        targetPhase:
+          type: string
+          description: |
+            目标期相。必须是该序列实际的增强期相；平扫提交 -> `code 20002`。
+          enum: [arterial, portal, delayed]
+      additionalProperties: false
+
+    CreateSegmentationTaskResponse:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          enum: [0]
+        message:
+          type: string
+        data:
+          type: object
+          required: [taskId, studyUid, seriesUid, model, modelVersion, status, fast, degraded, targetPhase, idempotentReplay, submittedBy, submittedAt]
+          properties:
+            taskId:
+              type: string
+              example: 'seg-0a8301f4-77b2-4c3d-9a15-7e2b8c6d0f13'
+            studyUid:
+              type: string
+            seriesUid:
+              type: string
+            model:
+              $ref: '#/components/schemas/SegmentationModel'
+            modelVersion:
+              type: string
+              description: 模型版本。**固定 2.18.0**，算法更新属重大软件更新需变更注册审批
+              example: '2.18.0'
+            weightsVersion:
+              type: string
+              nullable: true
+              description: 权重版本标识。部署时校验权重哈希后写入，用于模型可追溯（合规表五）
+              example: 'totalseg-2.18.0-weights-2026-08'
+            status:
+              $ref: '#/components/schemas/SegmentationTaskStatus'
+            fast:
+              type: boolean
+            degraded:
+              type: boolean
+              description: 是否因显存不足被强制降级（AC-10）
+            targetPhase:
+              type: string
+              enum: [arterial, portal, delayed]
+            estimatedWaitSeconds:
+              type: integer
+              description: 预计等待秒数（含队列）。前端据此设置轮询退避
+              example: 210
+            idempotentReplay:
+              type: boolean
+              description: 是否为幂等重放（`true` 表示未重复占用 GPU）
+            submittedBy:
+              type: string
+            submittedAt:
+              type: string
+              format: date-time
+          additionalProperties: false
+      additionalProperties: false
+
+    SegmentationTaskStatus:
+      type: string
+      description: |
+        任务状态机：`queued -> running -> succeeded | failed`。
+        Worker 领取到重复投递的消息时，若 `status` 已是 `running`/`succeeded` 则跳过（至少一次投递的幂等保证）。
+      enum: [queued, running, succeeded, failed]
+
+    PhaseValidation:
+      type: object
+      description: 期相前置校验结果。AI-01 要求肝胆/泌尿/胸外分割必须在增强期相上执行
+      required: [seriesPhase, eligible]
+      properties:
+        seriesPhase:
+          $ref: '#/components/schemas/SeriesPhase'
+        eligible:
+          type: boolean
+          description: 是否满足该模型的期相要求
+          example: true
+        reasonCode:
+          type: string
+          nullable: true
+          description: |
+            不满足时的原因码。`PHASE_NOT_ENHANCED` = 非增强期相；
+            `PHASE_LOW_CONFIDENCE` = 期相置信度 < 0.70
+          enum: [PHASE_NOT_ENHANCED, PHASE_LOW_CONFIDENCE, null]
+      additionalProperties: false
+
+    SegmentationStructure:
+      type: object
+      description: |
+        **AI 输出的单个解剖结构。合规硬约束：**
+
+        - 只有解剖结构名与量化体积，**没有任何自由文本字段**，
+          `additionalProperties: false` 使得越界字段在契约层即被拒。
+        - 因此 AI **在类型层面不可能产出诊断结论**（器审中心 2022 年第 8 号非辅助决策边界）。
+        - 严禁新增 `nature` / `diagnosis` / `malignancy` / `benign` / `impression` /
+          `suggestion` / `recommendation` / `conclusion` / `comment` / `description`
+          等任何承载结论的字段。需要医师判断的内容走报告 `impression`（执业医师署名）。
+      required: [structureName, structureLabelZh, volumeMl, confirmed]
+      properties:
+        structureName:
+          $ref: '#/components/schemas/StructureName'
+        structureLabelZh:
+          $ref: '#/components/schemas/StructureLabelZh'
+        volumeMl:
+          type: number
+          format: float
+          minimum: 0
+          description: |
+            量化体积（mL）。这是**测量值**，不是诊断结论。
+            进入报告前必须经执业医师逐项确认（AC-11）。
+          example: 1428.6
+        sopInstanceUid:
+          type: string
+          nullable: true
+          description: |
+            DICOM SEG 对象的 SOP Instance UID（经 STOW-RS 写入 dcm4chee）。
+            前端据此经 WADO-RS 拉取 labelmap 做三维重建。
+          example: '1.2.840.10008.5.1.4.1.1.66.592401236001'
+        confirmed:
+          type: boolean
+          description: 是否已被执业医师确认。未确认时报告提交被阻断
+          example: false
+      additionalProperties: false
+
+    SegmentationTaskError:
+      type: object
+      description: |
+        失败详情。**必须返回失败环节**（AI-02 硬要求），
+        禁止以空模型或零体积列表冒充成功。
+
+        字段命名说明：失败环节命名为 `failedAtStep` 而非 `stage` ——
+        在医学 AI 响应中 `stage` 极易被误读为 TNM 癌症分期（临床语境下是高频词）。
+        命名歧义在这种系统里是真实风险，直接消除比加注释更可靠。
+      required: [code, failedAtStep, message]
+      properties:
+        code:
+          type: integer
+          description: 错误码
+          example: 40002
+        failedAtStep:
+          type: string
+          description: |
+            失败的流水线环节。前端据此告知医师「哪些结论还可用、哪些不可用」，
+            并提供有损重试入口时须显式告知精度损失。
+          enum: [precheck, fetch, preprocess, inference, stow, callback]
+        message:
+          type: string
+          description: 面向医师的失败原因描述
+          example: 'GPU 显存不足导致推理中断，已完成 45%'
+      additionalProperties: false
+
+    ConfirmProgress:
+      type: object
+      description: |
+        AI 标记确认进度。`allConfirmed = false` 时**阻断报告提交与签名**
+        （AC-11：未全部确认则报告不可提交）。
+      required: [total, confirmed, allConfirmed]
+      properties:
+        total:
+          type: integer
+          description: 本次任务的 AI 结构项总数
+          example: 8
+        confirmed:
+          type: integer
+          description: 已确认项数
+          example: 4
+        allConfirmed:
+          type: boolean
+          example: false
+      additionalProperties: false
+
+    SegmentationTaskResponse:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          enum: [0]
+        message:
+          type: string
+        data:
+          type: object
+          required: [taskId, studyUid, seriesUid, model, modelVersion, status, fast, degraded, progressPercent, phaseValidation, structures, confirmProgress, disclaimer, submittedBy, submittedAt]
+          properties:
+            taskId:
+              type: string
+              example: 'seg-0a8301f4-77b2-4c3d-9a15-7e2b8c6d0f13'
+            studyUid:
+              type: string
+            seriesUid:
+              type: string
+            model:
+              $ref: '#/components/schemas/SegmentationModel'
+            modelVersion:
+              type: string
+              example: '2.18.0'
+            weightsVersion:
+              type: string
+              nullable: true
+              example: 'totalseg-2.18.0-weights-2026-08'
+            status:
+              $ref: '#/components/schemas/SegmentationTaskStatus'
+            fast:
+              type: boolean
+            degraded:
+              type: boolean
+              description: 降级标记。随报告归档（合规要求不得静默降级）
+            progressPercent:
+              type: integer
+              minimum: 0
+              maximum: 100
+            phaseValidation:
+              $ref: '#/components/schemas/PhaseValidation'
+            structures:
+              type: array
+              description: |
+                AI 结构化结果。`status` 非 `succeeded` 时为空数组
+                （失败不返回半成品结构）。
+              items:
+                $ref: '#/components/schemas/SegmentationStructure'
+            confirmProgress:
+              $ref: '#/components/schemas/ConfirmProgress'
+            error:
+              nullable: true
+              allOf:
+                - $ref: '#/components/schemas/SegmentationTaskError'
+            disclaimer:
+              type: string
+              description: |
+                固定合规声明串。**前端必须原样渲染，不可折叠、不可关闭**
+                （PRD COM-08，UIUX 合规声明条常驻）。
+              enum: ['本结果为 AI 辅助标记，不构成诊断结论，须经执业医师确认']
+            submittedBy:
+              type: string
+            submittedAt:
+              type: string
+              format: date-time
+            startedAt:
+              type: string
+              format: date-time
+              nullable: true
+            finishedAt:
+              type: string
+              format: date-time
+              nullable: true
+          additionalProperties: false
+      additionalProperties: false
+
+    ConfirmSegmentationRequest:
+      type: object
+      description: |
+        医师对 AI 辅助标记的逐项确认请求。
+
+        **安全约束：确认人身份不由前端传入。**
+        `confirmedBy` / `confirmedAt` **不在本schema 中，且两层都设了
+        `additionalProperties: false`**，客户端传了会被直接拒绝。
+
+        理由：AI 逐项确认是合规归档证据（国卫办医发〔2017〕8 号操作印痕、
+        PRD AI-03）。若确认人可由前端指定，任何登录用户都能代签别人的医师确认，
+        AC-11「强制逐项医师确认」形同虚设。同理确认时间必须用服务端时间，
+        否则可伪造确认时刻以规避超时与追溯。
+
+        服务端实现：从会话（JWT `sub`）取用户 ID，取 `now()` 作为确认时间。
+        **不接受任何形式的身份覆盖参数。**
+      required: [items]
+      properties:
+        items:
+          type: array
+          description: 待确认的 AI 结构项列表。允许分批提交
+          minItems: 1
+          maxItems: 200
+          items:
+            type: object
+            required: [structureName, action]
+            properties:
+              structureName:
+                $ref: '#/components/schemas/StructureName'
+              action:
+                type: string
+                description: |
+                  `confirmed` = 接受 AI 标记；`modified` = 医师手工修改后接受。
+                  `modified` 时 `modificationNote` 必填（修改留痕，电子病历规范要求）。
+                enum: [confirmed, modified]
+              modificationNote:
+                type: string
+                description: 修改说明。`action = modified` 时**必填**，无备注的修改一律拒绝
+                maxLength: 500
+                example: '胆囊壁增厚较明显，AI 轮廓未包含胆囊窝脂肪，请人工外扩 2mm 后确认'
+            # 两层 additionalProperties: false —— 确认人/确认时间等字段客户端传不进来
+            additionalProperties: false
+      additionalProperties: false
+
+    ConfirmSegmentationResponse:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          enum: [0]
+        message:
+          type: string
+        data:
+          type: object
+          required: [taskId, accepted, rejected, confirmProgress, idempotentReplay, confirmedAt]
+          properties:
+            taskId:
+              type: string
+            accepted:
+              type: integer
+              description: 成功记录的确认项数
+              example: 4
+            rejected:
+              type: integer
+              description: 被拒项数（结构名不存在于本任务结果中）
+              example: 0
+            confirmProgress:
+              $ref: '#/components/schemas/ConfirmProgress'
+            pendingSupervisorReview:
+              type: boolean
+              description: |
+                是否需要上级医师复核。`trainee_physician`（实习/试用期）确认时为 `true`，
+                此时报告**不可提交**（架构方案 §10.1：实习医师写入需审核）。
+              example: false
+            idempotentReplay:
+              type: boolean
+            confirmedAt:
+              type: string
+              format: date-time
+          additionalProperties: false
+      additionalProperties: false
+
+    PlanPayload:
+      type: object
+      description: |
+        规划方案数据（患者坐标系，mm）。
+
+        **有意保持松散**（ADR-004：`jsonb` + GIN 索引，避免过早固定 Schema）。
+        约定：结构由前端按科室场景定义，后端只做存储与乐观锁，**不解析语义**。
+        因此除 `entry` / `target` 两个渲染必需项外，
+        允许各科室扩展自己的键（如骨科的 `screws[]`、胸外的 `path[]`）。
+
+        硬约束（与 AI 合规边界同源，不属"自由"范畴）：
+        扩展键只允许**中性几何 / 量化**语义。
+        **禁止**引入病灶性质、疗效评价、术式建议等结论性字段
+        （`nature` / `diagnosis` / `malignancy` / `recommendation` 等）——
+        那是越过辅助决策边界，不是前端自定义。
+
+        两种典型形状（示例，非穷举）：
+        - 肝胆楔形切除：`entry` + `target` + `approachAngleDeg` + `avoidanceStructures`
+        - 骨科内固定：`entry_points[]` + `screws[]` + `path[]` + `measurements[]`
+      required: [entry, target]
+      properties:
+        entry:
+          type: object
+          description: |
+            入路点/入钉区。3D 视图渲染入路锥体与拾取点的依据。
+            约定含 3 个坐标，与 `target` 配对使用。
+          required: [patientXYZmm]
+          properties:
+            patientXYZmm:
+              type: array
+              description: 患者 DICOM 坐标系下入路点坐标 `[x, y, z]`（mm）
+              items:
+                type: number
+                format: float
+              minItems: 3
+              maxItems: 3
+              example: [-62.4, 118.7, -34.2]
+            orientation:
+              type: string
+              description: 入路方位（中性几何描述）
+              enum: [anterior, posterior, posterolateral_right, posterolateral_left, lateral_right, lateral_left, superior, inferior]
+              example: 'posterolateral_right'
+            label:
+              type: string
+              description: 入点标签（前端自定义，如「L1 入钉点」）
+              maxLength: 64
+          additionalProperties: true
+        target:
+          type: object
+          description: 靶点。3D 视图渲染目标结构与路径终点
+          required: [patientXYZmm, structureName]
+          properties:
+            patientXYZmm:
+              type: array
+              items:
+                type: number
+                format: float
+              minItems: 3
+              maxItems: 3
+              example: [-28.1, 86.3, -12.5]
+            structureName:
+              $ref: '#/components/schemas/StructureName'
+            label:
+              type: string
+              maxLength: 64
+          additionalProperties: true
+        approachAngleDeg:
+          type: number
+          format: float
+          description: 入路角度（度，0–90）
+          example: 32.5
+        corridorWidthMm:
+          type: number
+          format: float
+          minimum: 0
+          description: 手术通道宽度（mm）
+          example: 18.0
+        avoidanceStructures:
+          type: array
+          description: 需避开的解剖结构（中性几何语义）
+          items:
+            $ref: '#/components/schemas/StructureName'
+        notes:
+          type: string
+          description: 规划备注（医师录入的自由文本）
+          maxLength: 1000
+          example: '避开门静脉右后支，术中需超声辅助确认入路深度'
+      # 允许科室自定义扩展键（骨科 screws[]、胸外 path[] 等）。
+      # 这不是放弃约束：结论性字段的禁止由应用层 zod 白名单校验，
+      # 且已在本schema description 与 lint_openapi.js 中固化为可执行断言。
+      additionalProperties: true
+
+    CreatePlanRequest:
+      type: object
+      required: [studyUid, planType, payload]
+      properties:
+        studyUid:
+          type: string
+          pattern: '^[0-9]+(\.[0-9]+)+$'
+        segmentationTaskId:
+          type: string
+          description: 关联的分割任务 ID。规划基于该任务的三维重建结果
+        planType:
+          $ref: '#/components/schemas/PlanType'
+        title:
+          type: string
+          maxLength: 200
+          example: '肝右叶后段病灶楔形切除入路规划'
+        payload:
+          $ref: '#/components/schemas/PlanPayload'
+      additionalProperties: false
+
+    UpdatePlanRequest:
+      type: object
+      required: [version]
+      description: |
+        **`version` 必填**，这是 v1.0 唯一的一致性手段（ADR-006：不用 CRDT/OT ——
+        CRDT 静默合并会产生临床错误且不可审计）。缺失 -> `code 10001`；
+        与服务端当前值不一致 -> HTTP 409 + `code 20003`。
+      properties:
+        version:
+          type: integer
+          description: 客户端读到的版本号（乐观锁）
+          minimum: 1
+          example: 3
+        title:
+          type: string
+          maxLength: 200
+        payload:
+          $ref: '#/components/schemas/PlanPayload'
+        status:
+          type: string
+          description: |
+            状态流转。`archived` 为终态，之后修改 -> `code 50004`（需医务部门审批凭证）。
+          enum: [draft, confirmed, archived]
+      additionalProperties: false
+
+    PlanResponse:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          enum: [0]
+        message:
+          type: string
+        data:
+          type: object
+          required: [planId, studyUid, version, status, planType, payload, createdBy, createdAt, updatedBy, updatedAt, idempotentReplay]
+          properties:
+            planId:
+              type: string
+              example: 'plan-0a8305f2-3e91-4a72-b6d8-1c4e9f0a2b57'
+            studyUid:
+              type: string
+            segmentationTaskId:
+              type: string
+              nullable: true
+            version:
+              type: integer
+              description: 乐观锁版本号。每次成功更新自增 1
+              example: 4
+            status:
+              type: string
+              enum: [draft, confirmed, archived]
+            planType:
+              $ref: '#/components/schemas/PlanType'
+            title:
+              type: string
+              nullable: true
+            payload:
+              $ref: '#/components/schemas/PlanPayload'
+            createdBy:
+              type: string
+            createdByNameMasked:
+              type: string
+              example: '陈*'
+            createdAt:
+              type: string
+              format: date-time
+            updatedBy:
+              type: string
+            updatedByNameMasked:
+              type: string
+              example: '陈*'
+            updatedAt:
+              type: string
+              format: date-time
+            idempotentReplay:
+              type: boolean
+          additionalProperties: false
+      additionalProperties: false
+
+    AuthorRef:
+      type: object
+      description: |
+        内容作者。**恒为执业医师**（架构方案 §9.2：AI 不产出诊断文本，
+        报告 DTO 不接受 AI 生成的所见/诊断文本）。
+
+        无 AI 作者分支 —— 这不是遗漏，是刻意的设计：一旦存在 `authoredBy` 可为 AI 的分支，
+        合规边界就从类型层泄漏到运行时判断层。
+      required: [userId, nameMasked, title, department]
+      properties:
+        userId:
+          type: string
+          example: 'u-1-0a82f1a9'
+        nameMasked:
+          type: string
+          example: '周*'
+        title:
+          type: string
+          description: 专业技术职称。用于确认作者资质
+          enum: [主任医师, 副主任医师, 主治医师, 住院医师, 医师, 技师, 护士, 其他]
+        department:
+          type: string
+          example: '医学影像科'
+        authoredAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: 署名时间。由服务端写入，前端不可指定
+      additionalProperties: false
+
+    FindingSection:
+      type: object
+      description: |
+        检查所见的一段（分段结构化，RPT-01）。
+        分段键对应报告模板定义的窗位段落，缺失段落**阻断签名**（AC-12）。
+      required: [key, label, text, authoredBy]
+      properties:
+        key:
+          type: string
+          description: 段落键（模板定义）
+          enum: [plain, arterial, portal, delayed, lung_window, mediastinum_window, bone_window, coronal_sagittal, other]
+          example: 'portal'
+        label:
+          type: string
+          description: 段落显示名（模板定义）
+          example: '门脉期'
+        windowType:
+          type: string
+          description: |
+            该段落对应的阅片窗位。前端据此提供「跳转到对应窗位复核」入口，
+            保证报告描述与影像可对照（这是结构化报告相对自由文本的核心价值）。
+          enum: [abdominal_soft, lung, mediastinum, bone, liver_enhanced, brain, default]
+        text:
+          type: string
+          description: |
+            段落内容（执业医师撰写）。
+            系统**不做**文本相似度或关键词审查 —— 报告内容质量由三级质控与签名医师负责。
+          minLength: 1
+          maxLength: 2000
+          example: '肝右叶后段约 2.3×1.8cm 类圆形低密度影，边界较清，增强后动脉期不强化，延迟期轻度强化；门静脉主干及左右分支通畅，肝内血管走行未见异常。'
+        authoredBy:
+          $ref: '#/components/schemas/AuthorRef'
+      additionalProperties: false
+
+    SignedImpression:
+      type: object
+      description: |
+        影像诊断意见。**必须由执业医师署名**。
+
+        系统**不提供**任何 AI 生成或 AI 建议的诊断意见路径 ——
+        该字段的 schema 中不存在 `suggestedBy` / `aiSuggestion` 等分支（Spec §3 明确不做）。
+      required: [text, authoredBy]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          example: '肝右叶占位性病变，性质待定（建议穿刺活检）。'
+        authoredBy:
+          $ref: '#/components/schemas/AuthorRef'
+      additionalProperties: false
+
+    FollowUpRecommendation:
+      type: object
+      description: 建议随访（卫健委电子病历必备字段之一）。执业医师撰写
+      required: [text, authoredBy]
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          example: '建议 3 个月后复查肝脏增强 MRI 或 CT 平扫+三期增强，对比病灶大小与强化特征变化；穿刺活检结果回报后再行评估。'
+        authoredBy:
+          $ref: '#/components/schemas/AuthorRef'
+      additionalProperties: false
+
+    AiAssistReference:
+      type: object
+      description: |
+        报告中引用的单个 AI 辅助标记项。
+        **只含结构化引用，不含任何结论性文本** ——
+        `structureName` 是解剖结构，`volumeMl` 是测量值，`confirmAction` 是医师动作。
+        严禁在此新增 `impression` / `nature` / `malignancy` 等字段。
+      required: [structureName, structureLabelZh, volumeMl, confirmAction, confirmedByMasked, confirmedAt]
+      properties:
+        structureName:
+          $ref: '#/components/schemas/StructureName'
+        structureLabelZh:
+          $ref: '#/components/schemas/StructureLabelZh'
+        volumeMl:
+          type: number
+          format: float
+          example: 1428.6
+        confirmAction:
+          type: string
+          description: 医师对该项的处理动作
+          enum: [confirmed, modified]
+        confirmedByMasked:
+          type: string
+          description: 确认医师（掩码）
+          example: '周*'
+        confirmedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    AiAssist:
+      type: object
+      description: |
+        **AI 参与声明分组 —— AI 相关字段只允许出现在这里**（PRD COM-08、架构方案 §9.2）。
+
+        设计约束：
+        1. 本分组只承载结构化引用（结构名 + 体积 + 确认医师 + 确认时间）。
+        2. **不含任何结论性文本**：`additionalProperties: false` 阻断
+           `impression` / `nature` / `malignancy` / `suggestion` / `conclusion` 等字段。
+        3. `disclosure` 为固定常量声明串，不可省略（系统界面必须明示 AI 输出性质）。
+        4. `degraded` 必须随报告归档 —— 降级事实不得丢失（AC-10 + 不得静默降级）。
+        5. `allItemsConfirmed = false` 时阻断报告提交与签名（AC-11）。
+      required: [disclosure, modelName, modelVersion, degraded, segmentationTaskId, allItemsConfirmed, referencedStructures]
+      properties:
+        disclosure:
+          type: string
+          description: 固定合规声明串。前端必须原样常驻渲染，不可折叠不可关闭
+          enum: ['本结果为 AI 辅助标记，不构成诊断结论，须经执业医师确认']
+        modelName:
+          $ref: '#/components/schemas/SegmentationModel'
+        modelVersion:
+          type: string
+          example: '2.18.0'
+        degraded:
+          type: boolean
+          description: 是否为降级模式结果（显存不足强制 fast）
+        segmentationTaskId:
+          type: string
+          description: 可反查 AI 任务、分割结果与确认记录（谁在何时确认了哪一项）
+        allItemsConfirmed:
+          type: boolean
+          description: 是否已全部确认。为 `false` 时报告不可提交/签名
+        referencedStructures:
+          type: array
+          items:
+            $ref: '#/components/schemas/AiAssistReference'
+      additionalProperties: false
+
+    StructuredFields:
+      type: object
+      description: |
+        五类受控字段 + AI 声明分组（RPT-01）。
+
+        | 受控字段 | 类型 | 签名要求 |
+        |---------|------|---------|
+        | `examBodyPart` 检查部位 | string | 必填 |
+        | `scanMode` 扫描方式 | string | 必填 |
+        | `findings` 影像所见（分段） | FindingSection[] | 必填，至少一段非空 |
+        | `impression` 影像诊断意见 | SignedImpression | 必填 |
+        | `followUpRecommendation` 建议随访 | FollowUpRecommendation | 必填 |
+
+        任一缺失 -> 阻断签名，返回 `code 10001` + `data.missingFields`（AC-12）。
+      required: [examBodyPart, scanMode, findings, impression, followUpRecommendation, aiAssist]
+      properties:
+        examBodyPart:
+          type: string
+          description: 检查部位（受控字段）。由 `study.bodyPart` 自动带入且**不可编辑**（RPT-01）
+          minLength: 1
+          maxLength: 64
+          example: '上腹部'
+        scanMode:
+          type: string
+          description: 扫描方式（受控字段）。自动带入且不可编辑
+          minLength: 1
+          maxLength: 128
+          example: '腹部平扫+三期增强CT'
+        findings:
+          type: array
+          description: 影像所见，分段结构化（按窗位/期相分段）
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/FindingSection'
+        impression:
+          $ref: '#/components/schemas/SignedImpression'
+        followUpRecommendation:
+          $ref: '#/components/schemas/FollowUpRecommendation'
+        aiAssist:
+          $ref: '#/components/schemas/AiAssist'
+      additionalProperties: false
+
+    ReportLockState:
+      type: object
+      description: |
+        **服务端权威的锁定状态。前端禁止用本地 state 或 `signed_at` 是否为空自行推断。**
+
+        为什么必须由服务端下发（这是安全边界，不是便利字段）：
+        若前端自行判断锁定，篡改本地 state 或直接发请求即可编辑已签名报告，
+        AC-13「签名后立即锁定」与 AC-14「正文变更签名即失效」同时被绕过。
+        真正的保证在两层，前端这层只是如实呈现：
+          1. 服务端：PUT/更新接口对 `lockState != DRAFT` 的报告直接拒绝（50003）
+          2. 数据库：`trg_reports_no_signed_update` 触发器阻断 UPDATE（架构方案 §7）
+        即便两层都被绕过，前端也**不应**呈现可编辑态—— 契约层不给它判断依据之外的口子。
+
+        `signatureValid` 是独立于 `lockState` 的第二维：
+        锁定状态回答「能不能改」，它回答「签名还成不成立」。
+        两者组合出三种需要前端分别处理的情形（见下方说明）。
+      required: [state, editable, reason, signatureValid]
+      properties:
+        state:
+          type: string
+          description: |
+            锁定状态机：
+            - `DRAFT`可编辑
+            - `PENDING_REVIEW` 可编辑（审核中仍需允许医师修订，否则审核流程会僵住）
+            - `SIGNED` 锁定（终态）
+            - `ARCHIVED` 锁定（归档后修改需医务部门审批，`code 50004`）
+          enum: [DRAFT, PENDING_REVIEW, SIGNED, ARCHIVED]
+        editable:
+          type: boolean
+          description: |
+            **是否可编辑。前端据此禁用编辑控件，不要自行推导。**
+            这是 `state != DRAFT && state != PENDING_REVIEW` 的服务端判定结果。
+          example: false
+        reason:
+          type: string
+          description: |
+            锁定原因（`editable = false` 时有值）。
+            用于在锁定遮罩上显示可读的说明，避免用户以为是系统故障。
+          enum:
+            - null
+            - NOT_SIGNED_YET
+            - NOT_REVIEWED_YET
+            - SIGNED_LOCKED
+            - ARCHIVED_LOCKED
+            - PENDING_REVIEW_NOT_EDITABLE
+          example: SIGNED_LOCKED
+        signatureValid:
+          type: boolean
+          description: |
+            签名是否仍然成立。
+            服务端比对当前 `bodyDigest`（SM3）与 `signature.digestValue`：
+            一致为 `true`，不一致说明正文在签名后被改动过，签名**已失效**（AC-14）。
+
+            用途：这是**篡改检测信号**。
+            正常流程下已签名报告不允许被改动（触发器会阻断），
+            因此出现 `false` 意味着有人绕过应用层直接改了库，或签名后流程被绕过。
+            此时前端应显示最高告警并阻断一切编辑，同时提示联系信息科。
+          example: true
+        lockedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: 进入锁定态的时间（权威时间源）。未锁定为 `null`
+          example: '2026-10-22T11:56:30+08:00'
+        lockedScope:
+          type: array
+          description: |
+            锁定范围。`report_body` = 报告正文；`plan_payload` = 关联规划方案。
+            两者同签名、同审计、同归档（PRD：三维规划数据与报告正文同签名）。
+          items:
+            type: string
+            enum: [report_body, plan_payload]
+          example: [report_body, plan_payload]
+      additionalProperties: false
+
+    ReportRevision:
+      type: object
+      description: |
+        修改痕迹（卫健委电子病历必备字段：修改痕迹）。
+        报告**每次保存生成新版本**，旧版本内容保留（不 UPDATE 覆盖），
+        可完整回放。审计日志另有一份独立记录。
+      required: [version, editedByMasked, editedAt, changeSummary]
+      properties:
+        version:
+          type: integer
+          example: 2
+        editedByMasked:
+          type: string
+          example: '周*'
+        editedAt:
+          type: string
+          format: date-time
+        changeSummary:
+          type: string
+          description: 变更摘要。**由后端根据字段 diff 生成**，不依赖前端自述（防止遗漏）
+          maxLength: 500
+          example: '补录延迟期所见'
+      additionalProperties: false
+
+    ReportSignature:
+      type: object
+      description: |
+        电子签名信息（WS/T 847—2024 + COM-10）。
+
+        字段与 WS/T 847 要求逐项对应：
+        | 标准要求 | 本对象字段 |
+        |---------|------------|
+        | 数字签名流水号 | `serialNo` |
+        | 原文唯一序列号 | `documentUniqueSn` |
+        | 服务主体标识 | `subjectId` / `subjectNameMasked` |
+        | 服务对象标识 | `documentUniqueSn`（报告唯一标识） |
+        | 原文摘要值 | `digestValue` |
+        | 摘要算法标识 | `digestAlgorithm` |
+        | 证书序列号 | `certSerial` |
+        | 签名数据 | `signatureValue` |
+      required: [signatureId, serialNo, documentUniqueSn, subjectId, digestAlgorithm, digestValue, signatureAlgorithm, signatureValue, certSerial, signedAt, tsaToken, logSerialNo, logIntegrityDigest, verifiedAt]
+      properties:
+        signatureId:
+          type: string
+          example: 'sig-0a8313c8-4e52-9a07-c1d3-4e8b2f6a0c19'
+        serialNo:
+          type: string
+          description: 数字签名流水号（WS/T 847）。系统内唯一，格式 `SN-yyyy-MM-dd-nnnnnn`
+          example: 'SN-2026-10-22-000117'
+        documentUniqueSn:
+          type: string
+          description: |
+            原文唯一序列号。用 SM2 签名后的 UID 派生规则构造，全局唯一且可回溯到 PACS 对象
+          example: '1.2.840.10008.5.1.4.1.1.88.20261022115630.4471'
+        subjectId:
+          type: string
+          description: 服务主体标识（签名人用户 ID）
+          example: 'u-1-0a82f1a9'
+        subjectNameMasked:
+          type: string
+          example: '周*'
+        digestAlgorithm:
+          type: string
+          description: 摘要算法标识。国密要求 SM3
+          enum: [SM3]
+        digestValue:
+          type: string
+          description: |
+            原文摘要值（十六进制）。签名时对报告规范化正文计算。
+            **正文改一字符 -> 摘要变化 -> 原签名立即失效**（AC-14）。
+          pattern: '^[0-9a-f]{64}$'
+          example: '3a7d5b1e9c2f48096a3f1c8e7d5b2a40c9e3f7a1b6d2048e9c5f3a7b1d6e2c94'
+        signatureAlgorithm:
+          type: string
+          description: 签名算法。国密要求 SM2
+          enum: [SM2]
+        signatureValue:
+          type: string
+          description: 签名数据（Base64 DER 编码的 SM2 签名值）。私钥不出 UKey
+          example: 'MEUCIQDR3vJ7NmQ0Kx8pL2sT5wYb9cF1hA4dE6gH8jK0mN2oP4qR6sT8uV0wX2yZ4aB6cD8eF0gH2iJ4kL6mN8oP0qR2sT4uV6wX8yZ0aB2cD4eF6gH8iJ0kL2mN4oP6qR8sT0uV2wX4yZ6aB8cD0eF2gH4iJ6kL8mN0oP2qR4sT6uV8wX0yZ2aB4cD6eF8gH0iJ2kL4mN6oP8q=='
+        certSerial:
+          type: string
+          description: 证书序列号
+          example: '7921456789012345678901234567890'
+        certIssuerName:
+          type: string
+          description: 证书颁发者
+          example: 'CN=示范市医院数字证书颁发机构, O=示范市卫生健康委员会, C=CN'
+        signedAt:
+          type: string
+          format: date-time
+          description: |
+            签名时间。**必须来自权威可靠时间源（TSA / 北斗授时）**，
+            精度到秒。系统**不得**用本地时间兜底（AC-15、国卫办医发〔2017〕8 号第十一条）。
+        tsaAuthority:
+          type: string
+          description: 时间戳颁发机构
+          example: 'CN=示范市权威时间戳服务, O=示范市计量院, C=CN'
+        tsaToken:
+          type: string
+          description: TSA 时间戳凭证（Base64）。与签名同时执行、一一对应（WS/T 847）
+        logSerialNo:
+          type: string
+          description: |
+            签名日志流水号（`signature_logs` 表，独立于业务表存储）。
+            业务库被整体删除或损坏后，凭此流水号仍可独立还原每笔签名的验证结果（COM-10）。
+          example: 'SIGLOG-20261022-000117'
+        logIntegrityDigest:
+          type: string
+          description: |
+            签名日志自身的完整性摘要。WS/T 847 要求「日志本身可被数字签名」，
+            此摘要用于离线校验日志未被篡改（`pattern` 同 digestValue）。
+          pattern: '^[0-9a-f]{64}$'
+        verifiedAt:
+          type: string
+          format: date-time
+          description: 验签通过时间
+      additionalProperties: false
+
+    ReportResponse:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          enum: [0]
+        message:
+          type: string
+        data:
+          type: object
+          required: [reportId, studyUid, version, status, lockState, templateCode, patient, visit, study, structuredFields, author, reportTime, bodyDigestAlgorithm, bodyDigest, bodySha256, signature, revisionHistory, createdAt, updatedAt]
+          properties:
+            reportId:
+              type: string
+              example: 'r-0a8312b7-9d33-4e18-b2c7-5a0d3e6f8b94'
+            studyUid:
+              type: string
+            version:
+              type: integer
+              description: 报告版本号。每次保存自增，历史版本在 `revisionHistory` 与 `report_revisions` 中保留
+              example: 4
+            status:
+              type: string
+              description: |
+                报告状态机：`draft -> pending_review -> signed -> archived`。
+                `signed` 为终态，正文与关联规划方案一并锁定（AC-13/AC-14）。
+
+                **注意**：这是业务状态，用于筛选与展示。
+                判断「当前能否编辑」**必须用 `lockState`**，不要用本字段。
+              enum: [draft, pending_review, signed, archived]
+            lockState:
+              $ref: '#/components/schemas/ReportLockState'
+            templateCode:
+              type: string
+              description: 报告模板编码。行业标准模板为基线，科室可在标准字段内调整（Spec Q6）
+              example: 'abdomen_liver_ct_v3'
+            patient:
+              $ref: '#/components/schemas/PatientBrief'
+            visit:
+              $ref: '#/components/schemas/VisitBrief'
+            study:
+              $ref: '#/components/schemas/StudyBrief'
+            structuredFields:
+              $ref: '#/components/schemas/StructuredFields'
+            author:
+              allOf:
+                - $ref: '#/components/schemas/AuthorRef'
+              description: 报告医师（卫健委必备字段）
+            reviewer:
+              nullable: true
+              allOf:
+                - $ref: '#/components/schemas/AuthorRef'
+              description: 审核医师（卫健委必备字段）。未审核时为 `null`，此时不可签名（50001）
+            reportTime:
+              type: string
+              format: date-time
+              description: 报告时间（卫健委必备字段）
+            bodyDigestAlgorithm:
+              type: string
+              description: |
+                **被签名的摘要算法。国密要求 SM3，锁定不可改。**
+                注意与 Spec AC-13 的关系：AC-13 表述为「SHA-256 摘要」，
+                但 SM2 签名算法内部固定使用 SM3 摘要，无法改为对 SHA-256 签名。
+                故本契约采用**双摘要**方案（见bodyDigest 与 bodySha256）。
+              enum: [SM3]
+            bodyDigest:
+              type: string
+              description: |
+                **SM3 摘要（十六进制）—— 这才是签名真正绑定的值。**
+                签名与时间戳同时执行、一一对应（WS/T 847）。
+                正文改一字符-> 本值变化 -> 原签名立即失效（AC-14）。
+              pattern: '^[0-9a-f]{64}$'
+            bodySha256:
+              type: string
+              description: |
+                **SHA-256 摘要（十六进制）—— 对应 Spec AC-13 的「正文 SHA-256 摘要」。**
+                与 `bodyDigest` 同时计算并同时存储，两者随正文同步变化。
+
+                保留 SHA-256 的理由：AC-13 明确要求该摘要，且它是与既有病历
+                系统对接时可交叉比对的通用值（很多HIS/EMR 用 SHA-256 做完整性校验）。
+                **SHA-256 仅作内容绑定与展示，不参与国密签名运算** ——
+                用它做签名不满足密评的国密算法要求。
+              pattern: '^[0-9a-f]{64}$'
+            signature:
+              nullable: true
+              allOf:
+                - $ref: '#/components/schemas/ReportSignature'
+              description: 签名信息。未签署时为 `null`
+            revisionHistory:
+              type: array
+              description: 修改痕迹（卫健委必备字段）。按版本升序
+              items:
+                $ref: '#/components/schemas/ReportRevision'
+            createdAt:
+              type: string
+              format: date-time
+            updatedAt:
+              type: string
+              format: date-time
+          additionalProperties: false
+      additionalProperties: false
+
+    SignReportRequest:
+      type: object
+      required: [reportVersion, digestAlgorithm, ukeyCertSerial, nonce, signatureValue]
+      description: |
+        签名请求。私钥运算在 UKey 内完成，`signatureValue` 为对
+        `SM3(nonce || reportId || reportVersion || bodyDigest)` 的 SM2 签名（Base64 DER）。
+      properties:
+        reportVersion:
+          type: integer
+          description: 待签名的报告版本。与服务端当前版本不一致 -> `code 10001`（防止签了旧版）
+          minimum: 1
+          example: 4
+        digestAlgorithm:
+          type: string
+          description: 摘要算法。国密要求 SM3
+          enum: [SM3]
+        ukeyCertSerial:
+          type: string
+          description: |
+            本次签名所用的 UKey 证书序列号。
+            服务端须校验其与会话绑定的证书一致（防换 Key 签名），不一致 -> `code 10002`。
+          example: '7921456789012345678901234567890'
+        nonce:
+          type: string
+          description: |
+            防重放随机数，由前端在签名弹窗打开时生成。
+            **WS/T 847 签名超时机制**：弹窗 5 分钟无操作自动关闭并要求重新 UKey 认证，
+            过期 nonce -> `code 10001`。
+          pattern: '^[0-9a-f]{32}$'
+          example: 'b3f1c7e5092a4d68b1e3f5a7c9d2e4f6'
+        signatureValue:
+          type: string
+          description: 签名值（Base64 DER）。私钥不出 UKey
+          maxLength: 4096
+      additionalProperties: false
+
+    SignReportResponse:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          enum: [0]
+        message:
+          type: string
+        data:
+          type: object
+          required: [signatureId, reportId, reportVersion, serialNo, documentUniqueSn, subjectId, digestAlgorithm, digestValue, signatureAlgorithm, signatureValue, certSerial, signedAt, tsaToken, logSerialNo, reportLocked, lockedScope, verified, idempotentReplay]
+          properties:
+            signatureId:
+              type: string
+            reportId:
+              type: string
+            reportVersion:
+              type: integer
+            serialNo:
+              type: string
+              description: 数字签名流水号。幂等重放返回**同一流水号**（不产生第二条签名记录）
+              example: 'SN-2026-10-22-000117'
+            documentUniqueSn:
+              type: string
+            subjectId:
+              type: string
+            subjectNameMasked:
+              type: string
+              example: '周*'
+            digestAlgorithm:
+              type: string
+              enum: [SM3]
+            digestValue:
+              type: string
+              pattern: '^[0-9a-f]{64}$'
+            signatureAlgorithm:
+              type: string
+              enum: [SM2]
+            signatureValue:
+              type: string
+            certSerial:
+              type: string
+            signedAt:
+              type: string
+              format: date-time
+              description: 权威时间源时间（TSA / 北斗授时）
+            tsaAuthority:
+              type: string
+            tsaToken:
+              type: string
+            logSerialNo:
+              type: string
+              description: 签名日志流水号。业务库损坏后凭此独立还原验证结果（COM-10）
+            reportLocked:
+              type: boolean
+              description: 报告是否已锁定
+              example: true
+            lockedScope:
+              type: array
+              description: |
+                锁定范围。`report_body` = 报告正文；`plan_payload` = 关联规划方案
+                （PRD：三维规划数据与报告正文同签名、同审计、同归档）。
+              items:
+                type: string
+                enum: [report_body, plan_payload]
+            verified:
+              type: boolean
+              description: 签名与时间戳是否即时验签通过
+              example: true
+            idempotentReplay:
+              type: boolean
+          additionalProperties: false
+      additionalProperties: false
+
+    AuditChainVerification:
+      type: object
+      description: |
+        hash chain 校验结果（ADR-004、等保 8.1.4.3）。
+        `valid = false` 说明审计数据被篡改或损坏，前端须以最高告警呈现并阻断业务操作（R6）。
+      required: [valid, checkedRows, verifiedAt]
+      properties:
+        valid:
+          type: boolean
+          example: true
+        checkedRows:
+          type: integer
+          description: 本次校验的行数
+          example: 2
+        firstHashPrev:
+          type: string
+          nullable: true
+          description: 返回区间首行的 `hash_prev`，应等于上一条的 `hash_self`
+          pattern: '^[0-9a-f]{64}$'
+        lastHashSelf:
+          type: string
+          nullable: true
+          description: 返回区间末行的 `hash_self`
+          pattern: '^[0-9a-f]{64}$'
+        verifiedAt:
+          type: string
+          format: date-time
+      additionalProperties: false
+
+    AuditLogItem:
+      type: object
+      required: [auditLogId, eventTime, actorId, actorRoles, eventType, result, resourceType, resourceId, sourceIp, hashPrev, hashSelf]
+      properties:
+        auditLogId:
+          type: string
+          example: 'a-0a8320d4-1b62-4f70-9a3c-6b2e8d1f4a05'
+        eventTime:
+          type: string
+          format: date-time
+          description: 事件时间（权威授时）
+          example: '2026-10-22T11:31:07+08:00'
+        actorId:
+          type: string
+          description: 操作人。系统任务为服务账号（`svc-ai-worker` 等）
+          example: 'u-5-0a82e220'
+        actorNameMasked:
+          type: string
+          nullable: true
+          example: '赵*'
+        actorDepartment:
+          type: string
+          nullable: true
+          example: '肝胆外科'
+        actorRoles:
+          type: array
+          items:
+            $ref: '#/components/schemas/RoleCode'
+        eventType:
+          $ref: '#/components/schemas/AuditEventType'
+        result:
+          $ref: '#/components/schemas/AuditResult'
+        resultCode:
+          type: integer
+          nullable: true
+          description: 失败/拒绝时的业务错误码。`denied` 时为 `10004`
+          example: 10004
+        patientId:
+          type: string
+          nullable: true
+          description: 被访问患者 EMPI。非患者相关事件为 `null`
+          example: 'EMPI0000384721'
+        patientNameMasked:
+          type: string
+          nullable: true
+          example: '张*明'
+        resourceType:
+          type: string
+          enum: [study, series, instance, segmentation_task, plan, report, signature, user, role, patient_grant, measurement, session]
+        resourceId:
+          type: string
+          description: 资源标识
+          example: '1.2.840.10008.5.1.4.1.1.2.20261022100336'
+        sourceIp:
+          type: string
+          description: 来源 IP（IPv4/IPv6）
+          example: '10.20.31.57'
+        terminalId:
+          type: string
+          nullable: true
+          description: 终端标识。移动端只读阅览时用于设备追溯（MOB-01）
+          example: 'WKS-IMG-0412'
+        detail:
+          type: object
+          nullable: true
+          description: |
+            事件明细（结构化）。
+            **PHI 越权类事件（`result = denied`）必须在此给出拒绝原因** ——
+            这是合规追溯的核心线索。禁止写入患者姓名明文、身份证、手机号。
+          additionalProperties: true
+          example:
+            reason: '不在授权范围（未获该患者转诊授权）'
+            seriesCount: 4
+        hashPrev:
+          type: string
+          description: 前序记录摘要。链式防篡改字段（ADR-004）
+          pattern: '^[0-9a-f]{64}$'
+        hashSelf:
+          type: string
+          description: 本记录摘要。含 `hashPrev` + 关键字段的 SM3 摘要
+          pattern: '^[0-9a-f]{64}$'
+      additionalProperties: false
+
+    AuditLogListResponse:
+      type: object
+      required: [code, data]
+      properties:
+        code:
+          type: integer
+          enum: [0]
+        message:
+          type: string
+        data:
+          type: object
+          required: [items, total, page, limit, hasMore, chainVerification]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: '#/components/schemas/AuditLogItem'
+            total:
+              type: integer
+            page:
+              type: integer
+            limit:
+              type: integer
+            hasMore:
+              type: boolean
+            chainVerification:
+              $ref: '#/components/schemas/AuditChainVerification'
+          additionalProperties: false
+      additionalProperties: false

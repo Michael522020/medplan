@@ -1,0 +1,122 @@
+/**
+ * 视口与角标。
+ *
+ * 颜色、间距、字号全部来自 design-tokens 的 CSS 变量，零硬编码色值。
+ * 规则详见 src/styles/app.css 顶部的说明。
+ */
+
+/* ------------------------------------------------------------------ *
+ * 阅片工作台
+ * ------------------------------------------------------------------ */
+
+.viewer {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.viewer__left {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-right: 1px solid var(--color-border-subtle);
+  background: var(--color-surface-panel);
+}
+
+.viewer__left-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) 0;
+}
+
+.viewer__rail-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--touch-target-min);
+  height: var(--touch-target-min);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.viewer__rail-button:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+}
+
+.viewer__rail-hint {
+  color: var(--color-text-tertiary);
+  font-size: var(--text-2xs);
+}
+
+.viewer__left-header,
+.viewer__right-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: var(--statusbar-height);
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--color-border-subtle);
+  flex-shrink: 0;
+}
+
+.viewer__panel-title {
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.viewer__left-body,
+.viewer__right-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: var(--space-2);
+}
+
+.viewer__panel-loading {
+  padding: var(--space-4);
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+}
+
+.viewer__stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--color-surface-canvas);
+}
+
+.viewer__canvas-area {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 1px;
+  /* 1px 分隔用 Canvas 自身底色，不用边框 —— Canvas 上禁止边框 */
+  background: var(--color-surface-canvas);
+  flex: 1;
+  min-height: 0;
+}
+
+.viewer__forbidden {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+}
+
+.viewer__toolbar-float {
+  position: absolute;
+  left: 50%;
+  bottom: var(--space-2);
+  transform: translateX(-50%);
+  z-index: var(--z-sticky);
+}

@@ -1,0 +1,212 @@
+/**
+ * 应用外壳 / 顶栏 / 底栏。
+ *
+ * 颜色、间距、字号全部来自 design-tokens 的 CSS 变量，零硬编码色值。
+ * 规则详见 src/styles/app.css 顶部的说明。
+ */
+
+/* ------------------------------------------------------------------ *
+ * 应用外壳
+ * ------------------------------------------------------------------ */
+
+.app-root {
+  display: grid;
+  grid-template-rows: var(--statusbar-height) 1fr var(--statusbar-height);
+  height: 100vh;
+  overflow: hidden;
+  background: var(--color-surface-app);
+  color: var(--color-text-primary);
+}
+
+.app-root--login {
+  display: block;
+}
+
+.app-root__main {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ------------------------------------------------------------------ *
+ * 顶部状态栏（40px）
+ * ------------------------------------------------------------------ */
+
+.app-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  height: var(--statusbar-height);
+  padding: 0 var(--space-4);
+  border-bottom: 1px solid var(--color-border-subtle);
+  background: var(--color-surface-panel);
+  font-size: var(--text-sm);
+}
+
+.app-header__brand {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.app-header__product {
+  font-size: var(--text-md);
+  font-weight: var(--font-weight-semibold);
+  letter-spacing: var(--tracking-heading);
+  color: var(--color-accent-clinical);
+}
+
+.app-header__breadcrumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.app-header__crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.app-header__crumb a {
+  color: var(--color-text-secondary);
+  text-decoration: none;
+}
+
+.app-header__crumb a:hover {
+  color: var(--color-text-primary);
+  text-decoration: underline;
+}
+
+.app-header__crumb-separator {
+  transform: rotate(-90deg);
+  color: var(--color-text-tertiary);
+}
+
+.app-header__search {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  justify-content: center;
+}
+
+.app-header__search-placeholder {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 var(--space-3);
+  height: var(--control-min-size);
+  min-width: 240px;
+  border: 1px solid var(--color-border-default);
+  border-radius: var(--radius-sm);
+  background: var(--color-input-bg);
+  color: var(--color-text-tertiary);
+  font-size: var(--text-sm);
+}
+
+.app-header__patient {
+  flex-shrink: 0;
+  padding: 0 var(--space-2);
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+}
+
+.app-header__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-shrink: 0;
+}
+
+.app-header__icon-button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--touch-target-min);
+  height: var(--touch-target-min);
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  transition: background-color var(--motion-fast) var(--ease-standard);
+}
+
+.app-header__icon-button:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+}
+
+.app-header__badge {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  min-width: 14px;
+  padding: 0 3px;
+  border-radius: var(--radius-full);
+  background: var(--color-status-critical);
+  color: var(--color-text-on-accent);
+  font-size: var(--text-2xs);
+  line-height: 14px;
+  text-align: center;
+}
+
+.app-header__user {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--control-min-size);
+  padding: 0 var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.app-header__user:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text-primary);
+}
+
+/* ------------------------------------------------------------------ *
+ * 底部状态栏（40px）
+ * ------------------------------------------------------------------ */
+
+.app-status-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  height: var(--statusbar-height);
+  padding: 0 var(--space-4);
+  border-top: 1px solid var(--color-border-subtle);
+  background: var(--color-surface-panel);
+  font-size: var(--text-xs);
+  color: var(--color-text-secondary);
+}
+
+.app-status-bar__spacer {
+  flex: 1;
+}
+
+.app-status-bar__item,
+.app-status-bar__pacs {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.app-status-bar__pacs {
+  color: var(--color-status-normal);
+}
+
+.app-status-bar__pacs--offline {
+  color: var(--color-status-critical);
+}
+
+.app-status-bar__address {
+  color: var(--color-text-tertiary);
+}

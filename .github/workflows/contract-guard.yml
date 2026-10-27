@@ -1,0 +1,77 @@
+name: 契约与代码门禁
+
+# MedPlan 的合规边界由「契约」与「CI」保障，不由「人的自觉」保障。
+# 本工作流在每次 push / PR 上强制执行四类门禁：
+#   1. 静态断言（926 条）：契约结构、DDL 结构、迁移一致性、Token 同步、图标名、CSS 变量引用
+#   2. 编译期负向断言（13 条）：AI 合规边界在类型层面不可绕过
+#   3. 前后端类型检查 + 前端真实构建
+#   4. 真实执行验证（可选）：需 PostgreSQL 18 服务容器
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  contract-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # 与根 package.json 的 engines 保持一致：
+          # >=22.12.0（Vite 8 要求）且 <23（保持 LTS 窗口内，理由见 ADR-008）
+          node-version: '22.22.2'
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      # 已知警告：@cornerstonejs/codec-libjxl 声明 engines.node>=24，实为浏览器端 WASM，
+      # 误报。调查过程见 docs/decisions/ADR-008.md —— 不要据此升级 Node。
+      - name: 静态断言门禁（926 条）
+        run: npm run lint
+
+      - name: 编译期合规边界门禁（13 条负向断言）
+        run: npm run verify:types
+
+      - name: 前后端类型检查
+        run: npm run typecheck
+
+      - name: 前端真实构建
+        run: npm run build:web
+
+      # 体积门禁：Cornerstone 4MB 若内联进入口 chunk 会阻塞首屏下载。
+      # 医生路径是「登录→工作台→阅片」，工作台不需要 Cornerstone。
+      - name: 前端产物体积门禁
+        run: npm run lint:bundle
+
+  # 真实执行验证：REVOKE 是否真挡住 UPDATE、hash chain 是否真衔接。
+  # 等保测评看的是「能不能跑通 + 挡不挡得住」，静态断言证明不了。
+  db-runtime-verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: medplan_ci_only
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 数据库真实执行验证
+        env:
+          PG_HOST: 127.0.0.1
+          PG_PORT: '15432'
+          PG_USER: postgres
+          PG_PASS: medplan_ci_only
+          PG_DB: medplan_verify
+        run: bash scripts/verify_db.sh

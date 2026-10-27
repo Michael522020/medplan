@@ -1,0 +1,54 @@
+/**
+ * 提示条。
+ *
+ * 颜色、间距、字号全部来自 design-tokens 的 CSS 变量，零硬编码色值。
+ * 规则详见 src/styles/app.css 顶部的说明。
+ */
+
+/* ------------------------------------------------------------------ *
+ * 提示条
+ * ------------------------------------------------------------------ */
+
+.alert-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.alert-banner__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.alert-banner__action {
+  flex-shrink: 0;
+}
+
+.alert-banner--critical {
+  background: var(--color-status-critical-subtle);
+  border-color: var(--color-status-critical);
+  color: var(--color-status-critical);
+}
+
+.alert-banner--warning {
+  background: var(--color-status-critical-subtle);
+  border-color: var(--color-status-warning);
+  color: var(--color-status-warning);
+}
+
+.alert-banner--notice {
+  background: var(--color-surface-raised);
+  border-color: var(--color-border-default);
+  color: var(--color-text-primary);
+}
+
+.alert-banner--info {
+  background: var(--color-disclaimer-bar-bg);
+  border-color: var(--color-accent-clinical);
+  color: var(--color-text-primary);
+}

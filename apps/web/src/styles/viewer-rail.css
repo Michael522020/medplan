@@ -1,0 +1,41 @@
+/**
+ * 左侧栏与折叠条。
+ *
+ * 颜色、间距、字号全部来自 design-tokens 的 CSS 变量，零硬编码色值。
+ * 规则详见 src/styles/app.css 顶部的说明。
+ */
+
+/* ---- 右侧面板 ---- */
+
+.viewer__right {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  border-left: 1px solid var(--color-border-subtle);
+  background: var(--color-surface-panel);
+}
+
+.panel {
+  margin-bottom: var(--space-3);
+  padding: var(--space-2);
+  border: 1px solid var(--color-border-subtle);
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-app);
+}
+
+.panel__title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  margin: 0 0 var(--space-2);
+  color: var(--color-text-primary);
+  font-size: var(--text-sm);
+  font-weight: var(--font-weight-medium);
+}
+
+.panel__empty {
+  margin: 0 0 var(--space-2);
+  color: var(--color-text-tertiary);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+}

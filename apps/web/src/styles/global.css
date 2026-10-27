@@ -1,0 +1,80 @@
+/**
+ * 全局基础样式。
+ *
+ * 规则：**颜色零硬编码**。所有颜色、间距、字号必须引用
+ * @medplan/design-tokens 提供的 CSS 变量，禁止在本文件写死色值。
+ * 唯一例外是纯黑纯白（#000 / #fff），因为它们有明确的语义含义：
+ * 阅片 Canvas 周边必须是纯黑（防眩光，灰阶诊断要求）。
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--color-surface-app);
+  color: var(--color-text-primary);
+  font-family: var(--font-ui), 'Inter', 'Noto Sans SC', system-ui, sans-serif;
+  font-size: var(--text-md);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/*
+ * 临床数值必须等宽，避免窗宽窗位值、HU 值在拖动时左右跳动。
+ * 医生在阅片时盯着这些数字读，跳动会造成误读。
+ */
+.numeric,
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1;
+  font-family: var(--font-mono), 'JetBrains Mono', ui-monospace, monospace;
+}
+
+/* 焦点可见性：键盘操作必须看得见焦点位置 */
+:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
+/* 滚动条：暗色主题下默认滚动条过于刺眼 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-default) transparent;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--color-border-default, rgba(128, 138, 150, 0.4));
+  border-radius: 4px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* 尊重系统的减少动效偏好 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

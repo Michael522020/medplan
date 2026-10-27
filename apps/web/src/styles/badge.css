@@ -1,0 +1,42 @@
+/**
+ * 状态徽章（三重编码）。
+ *
+ * 颜色、间距、字号全部来自 design-tokens 的 CSS 变量，零硬编码色值。
+ * 规则详见 src/styles/app.css 顶部的说明。
+ */
+
+/* ------------------------------------------------------------------ *
+ * 状态徽章（三重编码：颜色 + 图标 + 文字）
+ * ------------------------------------------------------------------ */
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 1px var(--space-2);
+  border: 1px solid currentColor;
+  border-radius: var(--radius-xs);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  white-space: nowrap;
+}
+
+.status-badge--critical {
+  color: var(--color-status-critical);
+}
+
+.status-badge--warning {
+  color: var(--color-status-warning);
+}
+
+.status-badge--normal {
+  color: var(--color-status-normal);
+}
+
+.status-badge--pending {
+  color: var(--color-confirm-pending);
+}
+
+.status-badge--info {
+  color: var(--color-status-info);
+}

@@ -1,0 +1,122 @@
+/**
+ * 阅片工具条。
+ *
+ * 颜色、间距、字号全部来自 design-tokens 的 CSS 变量，零硬编码色值。
+ * 规则详见 src/styles/app.css 顶部的说明。
+ */
+
+/* ---- 视口 ---- */
+
+.viewport {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  background: var(--color-surface-canvas);
+}
+
+.viewport__canvas {
+  width: 100%;
+  height: 100%;
+}
+
+.viewport__overlay {
+  position: absolute;
+  inset: 0;
+  /* 角标不响应点击，避免误触遮挡影像 */
+  pointer-events: none;
+  /* Canvas 上的文字一律用 text-on-canvas（双主题恒为浅色） */
+  color: var(--color-text-on-canvas);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  font-variant-numeric: var(--number-font-feature);
+  line-height: 1.4;
+}
+
+.viewport__corner {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  /* 1px 深色描边保证在任意影像亮度上可读 */
+  text-shadow: 0 1px 2px var(--color-shadow-ambient);
+}
+
+.viewport__corner--tl {
+  top: var(--space-2);
+  left: var(--space-2);
+}
+
+.viewport__corner--tr {
+  top: var(--space-2);
+  right: var(--space-2);
+  align-items: flex-end;
+}
+
+.viewport__corner--bl {
+  bottom: var(--space-2);
+  left: var(--space-2);
+}
+
+.viewport__corner--br {
+  bottom: var(--space-2);
+  right: var(--space-2);
+  align-items: flex-end;
+}
+
+.viewport__plane {
+  font-family: var(--font-ui);
+  font-size: var(--text-2xs);
+  font-weight: var(--font-weight-medium);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
+
+.viewport__hu {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(12px, -50%);
+  padding: 2px var(--space-2);
+  border-radius: var(--radius-xs);
+  background: var(--color-surface-overlay);
+  color: var(--color-text-on-canvas);
+  font-size: var(--text-2xs);
+}
+
+.viewport__loading {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
+  background: var(--color-surface-canvas);
+  color: var(--color-text-on-canvas);
+  text-align: center;
+}
+
+.viewport__loading-title {
+  margin: 0;
+  font-size: var(--text-sm);
+}
+
+.viewport__loading-detail {
+  margin: 0;
+  color: var(--color-text-secondary);
+  font-size: var(--text-xs);
+}
+
+.viewport__progress {
+  width: 240px;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--color-surface-overlay);
+  overflow: hidden;
+}
+
+.viewport__progress-fill {
+  height: 100%;
+  background: var(--color-accent-clinical);
+  transition: width var(--motion-base) var(--ease-standard);
+}
