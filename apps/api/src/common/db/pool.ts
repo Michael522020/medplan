@@ -46,7 +46,7 @@ export function businessPoolConfig(): DbPoolConfig {
   return {
     connectionString:
       process.env.DATABASE_URL ??
-      'postgresql://app_rw@localhost:5432/medplan?schema=medplan',
+      'postgresql://app_rw@localhost:5432/medplan',
     max: readInt(process.env.DB_POOL_MAX, 10),
     idleTimeoutMillis: readInt(process.env.DB_IDLE_TIMEOUT_MS, 30_000),
     connectionTimeoutMillis: readInt(process.env.DB_CONNECT_TIMEOUT_MS, 5_000),
@@ -58,16 +58,62 @@ export function auditPoolConfig(): DbPoolConfig {
   return {
     connectionString:
       process.env.AUDIT_DATABASE_URL ??
-      'postgresql://app_audit@localhost:5432/medplan?schema=medplan',
+      'postgresql://app_audit@localhost:5432/medplan',
     max: readInt(process.env.AUDIT_POOL_MAX, 4),
     idleTimeoutMillis: readInt(process.env.DB_IDLE_TIMEOUT_MS, 30_000),
     connectionTimeoutMillis: readInt(process.env.DB_CONNECT_TIMEOUT_MS, 5_000),
   };
 }
 
+/**
+ * 业务 schema 名。全部 28 张业务表都在该 schema 下。
+ */
+const BUSINESS_SCHEMA = 'medplan';
+
+/**
+ * 给连接串补上 `search_path`。
+ *
+ * ## 为什么必须显式设置 search_path
+ *
+ * node-postgres **不认** `?schema=` 参数 —— 它只认 `?options=`。
+ * `pg` 的 `connection-parameters.js` 只读取 `options`：
+ *   > this.options = val('options', config)
+ *
+ * 而 `pg-connection-string` 会把 `schema=medplan` 解析成一个
+ * **无人读取**的 `schema` 字段 —— 静默失效，无任何警告。
+ *
+ * 后果：连接建立后 `search_path` 仍是默认的 `"$user", public`，
+ * 而全部业务表都在 `medplan` schema 下 ⇒ 每条查询都报
+ * `42P01 relation "..." does not exist`。
+ *
+ * ## 为什么不能只靠 Pool 的 options 配置项
+ *
+ * `pg` 的构造顺序是：
+ *   > config = Object.assign({}, config, parse(config.connectionString))
+ *
+ * 即 **URL 里的 `options` 会覆盖显式配置的 `options`**。
+ * 若运维在 `DATABASE_URL` 里带了 `?options=...`（覆盖别的设置），
+ * 我们的显式配置就失效了。因此必须在**连接串层面**改写。
+ *
+ * ## 为什么不用 DB 级 `ALTER DATABASE ... SET search_path`
+ *
+ * 那要求 DBA 额外执行一条管理语句，且不同环境（开发/测试/生产）容易漏。
+ * 应用侧保证连接自带正确的 search_path，部署更简单也更可靠。
+ */
+export function withBusinessSearchPath(connectionString: string): string {
+  // 已经显式带了 options -> 不覆盖运维的设置（但要确保含 medplan）
+  if (/[?&]options=/.test(connectionString)) {
+    return connectionString;
+  }
+  const separator = connectionString.includes('?') ? '&' : '?';
+  const options = encodeURIComponent(`-c search_path=${BUSINESS_SCHEMA},public`);
+  return `${connectionString}${separator}options=${options}`;
+}
+
 export function createPool(config: DbPoolConfig): Pool {
   return new Pool({
-    connectionString: config.connectionString,
+    // 关键：在连接串层面补 search_path（见 withBusinessSearchPath 的说明）
+    connectionString: withBusinessSearchPath(config.connectionString),
     max: config.max,
     idleTimeoutMillis: config.idleTimeoutMillis,
     connectionTimeoutMillis: config.connectionTimeoutMillis,

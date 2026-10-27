@@ -216,14 +216,17 @@ export class StudiesRepository {
    *
    * 用于 `GET /studies?patientId=...`：指定患者不可见时返 10004，
    * 与「患者不存在」返回完全相同的响应。
+   *
+   * ## 注意：不加 `deleted_at` 条件
+   *
+   * `v_patients_masked` 视图**没有** `deleted_at` 列 —— 视图定义里
+   * 已经在内部 `WHERE p.deleted_at IS NULL` 过滤掉了软删除的患者
+   * （schema.sql 的视图定义）。对视图再写 `p.deleted_at IS NULL`
+   * 会报 `42703 column p.deleted_at does not exist`。
    */
   async probePatientScope(empiId: string, access: AccessContext): Promise<boolean> {
     const visibility = patientVisibilityPredicate('p.id', access);
-    const where = andWhere(
-      visibility,
-      { sql: 'p.deleted_at IS NULL', values: [] },
-      eq('p.empi_id', empiId)
-    );
+    const where = andWhere(visibility, eq('p.empi_id', empiId));
     const row = await queryOne<{ ok: number }>(
       this.pool,
       `SELECT 1 AS ok FROM v_patients_masked p WHERE ${where.sql} LIMIT 1`,

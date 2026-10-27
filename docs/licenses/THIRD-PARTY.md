@@ -24,6 +24,7 @@
 | dicomweb-client | 0.11.3 | MIT | 允许 | — |
 | **@tabler/icons-react** | 3.49.0 | **MIT** | 允许 | 全项目唯一图标库 |
 | pg (node-postgres) | 8.23.1 | MIT | 允许 | — |
+| **ioredis** | **6.0.0** | **MIT** | **允许** | **Redis 客户端库（不含 Redis 服务端代码）。用于 AI 任务队列的 Redis Stream 投递与消费** |
 | openapi-typescript | 7.4.4 | MIT | 允许 | — |
 
 ---
@@ -55,6 +56,16 @@
 Redis 在 7.0 之后改用 RSALv2 / SSPL / AGPLv3 三选一许可，8.x 起主推 AGPLv3。
 **AGPLv3 对闭源 SaaS 有网络分发传染性**。若院方要求纯闭源交付，建议改用 **Valkey**（BSD 许可，Redis 社区 fork）。
 本项目在文档中把 Redis 的用途限定为「缓存/会话/任务队列」，实际可替换。
+
+**注意区分「客户端」与「服务端」**：
+
+| 组件 | 许可 | 影响 |
+|------|------|------|
+| **ioredis 6.0.0**（本项目使用的客户端库） | **MIT** | 可闭源商用，无传染性 |
+| Redis 8.x **服务端** | AGPLv3 等 | 需按上文确认或改用 Valkey |
+
+客户端库与服务端是两回事 —— ioredis 只是通过 TCP 协议说话，
+不包含任何 Redis 服务端代码，因此不受 AGPLv3 影响。
 
 ---
 

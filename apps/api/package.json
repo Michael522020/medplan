@@ -10,7 +10,8 @@
     "start": "node --experimental-strip-types src/main.ts",
     "typecheck": "tsc --noEmit",
     "test": "npm run build:test && node --test .test-build/__tests__/*.test.js",
-    "build:test": "tsc -p tsconfig.json --noEmit false --outDir .test-build --declaration false --sourceMap false && node -e \"require('fs').writeFileSync('.test-build/package.json','{\\\"type\\\":\\\"module\\\"}')\""
+    "build:test": "tsc -p tsconfig.json --noEmit false --outDir .test-build --declaration false --sourceMap false && node -e \"require('fs').writeFileSync('.test-build/package.json','{\\\"type\\\":\\\"module\\\"}')\"",
+    "test:integration": "npm run build:test && node --test --test-timeout=30000 .test-build/__tests__/*.test.js"
   },
   "dependencies": {
     "@medplan/contracts": "*",
@@ -19,6 +20,7 @@
     "@nestjs/core": "12.2.0",
     "@nestjs/platform-fastify": "12.2.0",
     "fastify": "5.12.7",
+    "ioredis": "^6.0.0",
     "pg": "8.23.1",
     "reflect-metadata": "0.2.2",
     "rxjs": "7.8.2"

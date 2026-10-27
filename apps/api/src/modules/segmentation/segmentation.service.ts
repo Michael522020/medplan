@@ -21,6 +21,7 @@ import {
 import { rejectionReason } from './model-license-reason.js';
 import { SegmentationRepository } from './segmentation.repository.js';
 import { SegmentationConfirmsRepository } from './segmentation-confirms.repository.js';
+import { TaskDispatcherService } from './task-dispatcher.service.js';
 import {
   evaluatePhaseEligibility,
   toSubmitResponse,
@@ -42,6 +43,7 @@ export class SegmentationService {
     private readonly repository: SegmentationRepository,
     private readonly confirmsRepository: SegmentationConfirmsRepository,
     private readonly auditService: AuditService,
+    private readonly dispatcher: TaskDispatcherService,
     @Inject(DB_POOL) private readonly pool: Pool
   ) {}
 
@@ -176,9 +178,33 @@ export class SegmentationService {
           degraded: false,
         },
       });
+      // 投递 outbox 行 —— **与任务落库、审计写入同一事务**。
+      //
+      // 这一行是「任务存在 ⟺ 队列有消息」不变量的保证：
+      // 若它在事务外写，进程在任务提交后崩溃就会留下
+      // 「有任务但没有 outbox 行」= 永远不会被投递的任务（静默丢任务）。
+      await this.dispatcher.enqueue(client, {
+        taskId: task.id,
+        taskType: 'segmentation_task',
+        idempotencyKey,
+        payload: {
+          task_id: task.id,
+          study_uid: request.studyUid,
+          series_uid: request.seriesUid,
+          model: request.model,
+          model_version: '2.18.0',
+          target_phase: request.targetPhase,
+          fast: request.fast === true,
+          degraded: false,
+        },
+      });
       return task;
     });
     markBusinessAuditCommitted();
+
+    // 投递在**事务提交之后**发生（顺序要求：必须先落库后投递）。
+    // 失败不抛给调用方 —— 任务已落库，outbox 会补偿投递。
+    await this.dispatcher.dispatchPending();
 
     return toSubmitResponse(created, false);
   }

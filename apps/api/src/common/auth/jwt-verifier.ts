@@ -270,11 +270,23 @@ export function signSessionToken(
   const signedData = `${encodedHeader}.${encodedBody}`;
   const signature = createHmac('sha256', secret).update(signedData).digest();
   return {
-    token: `${signedData}.${base64url(signature.toString('base64'))}`,
+    // 签名段只做**一次** base64url 编码。
+    // 曾经写成 base64url(signature.toString('base64')) —— 那是双重编码：
+    // 解出来是 32 字节的 base64 文本而非 32 字节的原始 HMAC，
+    // 与标准 JWT（RFC 7515 §3.4）不符，任何标准实现都验不过。
+    token: `${signedData}.${base64url(signature)}`,
     expiresIn: payload.expiresInSeconds,
   };
 }
 
-function base64url(value: string): string {
-  return Buffer.from(value, 'utf8').toString('base64url');
+/**
+ * base64url 编码。
+ *
+ * 接受 string 或 Buffer —— 签名段是**原始字节**（Buffer），
+ * 头部/载荷是 UTF-8 文本（string）。两者都只编码**一次**。
+ */
+function base64url(value: string | Buffer): string {
+  return Buffer.isBuffer(value)
+    ? value.toString('base64url')
+    : Buffer.from(value, 'utf8').toString('base64url');
 }

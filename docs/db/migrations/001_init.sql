@@ -311,12 +311,18 @@ END;
 $$;
 
 -- studies.patient_id 与 visits.patient_id 同步
+-- 触发器函数体里的表名解析发生在**首次执行**时，不是 DDL 时。
+-- 若函数没有固定 search_path，运行时按调用者的 search_path 解析 ——
+-- 而应用连接若未设 search_path（默认 "\"$user\", public"），
+-- 就会报 `relation "visits" does not exist`。
+-- 因此触发器函数必须显式固定 search_path（同 sm3_or_fallback / fn_audit_chain_guard）。
 CREATE OR REPLACE FUNCTION fn_sync_study_patient()
 RETURNS trigger
 LANGUAGE plpgsql
+SET search_path = medplan, public, pg_temp
 AS $$
 BEGIN
-  SELECT patient_id INTO NEW.patient_id FROM visits WHERE id = NEW.visit_id;
+  SELECT patient_id INTO NEW.patient_id FROM medplan.visits WHERE id = NEW.visit_id;
   IF NEW.patient_id IS NULL THEN
     RAISE EXCEPTION 'visit_id % 不存在，无法同步 patient_id', NEW.visit_id;
   END IF;
@@ -1283,6 +1289,10 @@ COMMENT ON VIEW v_audit_logs_trail IS
 -- ---------------------------------------------------------------------
 
 -- 审计链完整性校验。每日定时调用，断裂即告警（风险 R6）
+-- search_path 必须固定：函数体里的 `audit_logs` 在**首次执行**时解析，
+-- 按调用者的 search_path 走。应用连接若未设 search_path 会报
+-- `relation "audit_logs" does not exist` —— 而这是每日告警任务，
+-- 失败意味着审计链断裂**无人知晓**（比断裂本身更危险）。
 CREATE OR REPLACE FUNCTION fn_verify_audit_chain()
 RETURNS TABLE (
   broken_id   bigint,
@@ -1291,13 +1301,14 @@ RETURNS TABLE (
   actual_prev  char(64)
 )
 LANGUAGE plpgsql
+SET search_path = medplan, public, pg_temp
 AS $$
 DECLARE
   v_prev text := repeat('0', 64);
   r record;
 BEGIN
   FOR r IN
-    SELECT id, event_time, hash_prev, hash_self FROM audit_logs ORDER BY id ASC
+    SELECT id, event_time, hash_prev, hash_self FROM medplan.audit_logs ORDER BY id ASC
   LOOP
     IF r.hash_prev <> v_prev THEN
       RETURN QUERY SELECT r.id, r.event_time, v_prev::char(64), r.hash_prev;
