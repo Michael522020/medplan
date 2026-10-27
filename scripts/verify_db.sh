@@ -153,9 +153,25 @@ else
   ok "app_rw TRUNCATE audit_logs 被拒（权限层）"
 fi
 # 触发器层（用表 owner 绕过权限层，验证第二层仍拦住）
+#
+# **必须有数据才能验证**：`BEFORE DELETE ... FOR EACH ROW` 是行级触发器，
+# 表为空时 DELETE 影响 0 行，触发器不会执行，也就抛不出异常 ——
+# psql 退出码为 0，会被误判成「触发器层未生效」。
+#
+# 所以先插入一条测试数据（顺带验证 INSERT 触发器），再测 DELETE。
+if PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
+     -v ON_ERROR_STOP=1 -tAc \
+     "INSERT INTO medplan.audit_logs (actor_id, event_type, result, resource_type, resource_id, hash_prev, hash_self)
+      VALUES (NULL,'trigger_probe','success','probe','probe-1', repeat('0',64), repeat('0',64));" >/tmp/r4a.log 2>&1; then
+  ok "触发器探针行插入成功（INSERT 触发器未报错）"
+else
+  bad "触发器探针行插入失败"
+  cat /tmp/r4a.log
+fi
 if PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_DB" \
      -v ON_ERROR_STOP=1 -tAc "DELETE FROM medplan.audit_logs;" >/tmp/r4.log 2>&1; then
   bad "表 owner 竟能 DELETE audit_logs —— 触发器层未生效"
+  cat /tmp/r4.log
 else
   ok "表 owner DELETE audit_logs 被拒（触发器层，第二层防护生效）"
 fi
@@ -181,7 +197,13 @@ FIRST_PREV=$(psql_q "SELECT hash_prev FROM medplan.audit_logs ORDER BY id LIMIT 
 if [ "$FIRST_PREV" = "0000000000000000000000000000000000000000000000000000000000000000" ]; then
   ok "首条记录 hash_prev 为 64 个 0（空链标记）"
 else
-  bad "首条记录 hash_prev = $FIRST_PREV，期望 64 个 0"
+  bad "首条记录 hash_prev = [$FIRST_PREV]，期望 64 个 0"
+  # 诊断：char(64) 会被 PostgreSQL 去掉尾部空格，空格填充的 char 读出来可能是空串。
+  # 用 length() 与 quote() 区分「真的是空」与「被空格填充后读成空」。
+  say "    诊断 length(hash_prev) = [$(psql_q "SELECT length(hash_prev) FROM medplan.audit_logs ORDER BY id LIMIT 1;")]"
+  say "    诊断 quote(hash_prev)   = [$(psql_q "SELECT quote(hash_prev) FROM medplan.audit_logs ORDER BY id LIMIT 1;")]"
+  say "    诊断 首行 id/行数       = [$(psql_q "SELECT min(id) FROM medplan.audit_logs;")] / [$(psql_q "SELECT count(*) FROM medplan.audit_logs;")]"
+  say "    诊断 触发器清单         = [$(psql_q "SELECT string_agg(tgname, ',') FROM pg_trigger WHERE tgrelid='medplan.audit_logs'::regclass AND NOT tgisinternal;")]"
 fi
 SECOND_PREV=$(psql_q "SELECT hash_prev FROM medplan.audit_logs ORDER BY id OFFSET 1 LIMIT 1;")
 FIRST_SELF=$(psql_q "SELECT hash_self FROM medplan.audit_logs ORDER BY id LIMIT 1;")
@@ -211,11 +233,13 @@ DFLT=$(psql_q "SELECT count(*) FROM pg_class WHERE relname='audit_logs_default';
 if [ "${DFLT:-0}" = "1" ]; then ok "DEFAULT 兜底分区存在（时间落在分区外也不会丢审计）"; else bad "缺DEFAULT 兜底分区"; fi
 FUTURE=$(psql_q "INSERT INTO medplan.audit_logs (actor_id, event_type, result, resource_type, resource_id, hash_prev, hash_self)
                 VALUES (NULL,'auth_login','success','session','sess-future', repeat('0',64), repeat('0',64))
-                RETURNING 1;" 2>/dev/null | head -1)
+                RETURNING 1;" 2>/tmp/future.log | head -1)
 if [ -n "${FUTURE// /}" ]; then
   ok "超出已建分区范围的时间可写入（落在兜底分区，不丢审计）"
 else
   bad "超出分区范围写入失败 —— 会丢审计事件"
+  say "    诊断 stderr: $(head -3 /tmp/future.log | tr '\n' ' ')"
+  say "    诊断 分区清单: $(psql_q "SELECT string_agg(c.relname, ',') FROM pg_class c JOIN pg_inherits i ON i.inhrelid=c.oid JOIN pg_class p ON p.oid=i.inhparent WHERE p.relname='audit_logs' AND c.relkind='r';")"
 fi
 
 # 8. 卫健委字段覆盖
